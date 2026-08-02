@@ -126,7 +126,8 @@ src/
     mod.rs
     sysfs.rs           # /sys/class/power_supply -> Battery. Units resolved here.
     types.rs           # our Battery / Status (+ health, time_remaining)
-    history.rs         # session-scoped sample ring for the graph
+    history.rs         # session sample ring: the graph's data, GAP_SECS, and
+                       #   recent_power (the smoothed rate the estimates use)
 data/
   dev.miguelrincon.Leyden.desktop
   icons/hicolor/scalable/apps/dev.miguelrincon.Leyden.svg
@@ -167,8 +168,9 @@ This is Redux with a compiler: actions in, one reducer, view derived from state.
   — status icon, the percentage in `.title-1 .numeric`, the headline line
   ("Charging · 1 h 12 min until full"), a `gtk::LevelBar` — then
   `adw::PreferencesGroup`s: **History** (the graph, described by the span it
-  covers), **Power** (draw/intake, charge, voltage, source) and **Health**
-  (capacity vs design, cycles, technology).
+  covers), **Power** (draw/intake with the trailing average as its subtitle,
+  charge, voltage, source) and **Health** (capacity vs design, cycles,
+  technology).
 - No battery: an `adw::StatusPage`. Missing value: `—`, never a blank or a zero.
 
 ## Scope
@@ -186,8 +188,15 @@ Issue-driven cadence — one small vertical slice, one PR each.
   slope — that gap is real, either a suspend or a hidden window with the timer
   off. The x axis auto-fits the samples held, so the plot fills the width from
   the first minute instead of creeping in from the right.
-- **M3** — Session estimates that beat the instantaneous reading: `power_now` is
-  noisy, so smooth over the sample window for "time left" and "time to full".
+- ✅ **M3** — Estimates that beat the instantaneous reading. `Battery::
+  time_remaining` now **takes the rate in watts** instead of reading
+  `self.power`, and the caller passes `History::recent_power(SMOOTH_SECS)` — the
+  mean over the trailing 2 minutes. That average walks back from the newest
+  sample and stops at anything that would poison it: a different `Status` (a
+  charge rate says nothing about a drain rate) or a `GAP_SECS` gap (samples
+  either side of a suspend are not neighbours in time). It falls back to the live
+  reading until there is history to average. The Power row keeps showing the
+  live watts and gains the average as a subtitle, but only once the two differ.
 - **M4** — Persistence: keep history across launches (and therefore across
   suspend) so the graph is useful the moment the window opens.
 - **M5** — Polish: preferences (poll interval, theme), keyboard shortcuts,

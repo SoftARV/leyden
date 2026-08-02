@@ -10,13 +10,8 @@ use relm4::gtk;
 use relm4::gtk::cairo;
 use relm4::gtk::gdk;
 
-use crate::battery::history::{History, elapsed_secs};
+use crate::battery::history::{GAP_SECS, History, elapsed_secs};
 use crate::battery::types::Status;
-
-/// Samples further apart than this did not just miss a poll — the machine slept
-/// or the window was hidden, and the timer came off. The line breaks there
-/// rather than inventing a slope across the gap.
-const GAP_SECS: f64 = 15.0;
 
 const PAD: f64 = 14.0;
 const LINE_WIDTH: f64 = 2.0;
@@ -245,6 +240,7 @@ mod tests {
             history.push(Sample {
                 at: start + Duration::from_secs(*secs),
                 percent: *percent,
+                power: None,
                 status: *status,
             });
         }

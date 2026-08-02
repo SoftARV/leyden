@@ -80,10 +80,15 @@ impl Battery {
         (design > 0.0).then(|| full / design * 100.0)
     }
 
-    /// Time until empty when discharging, until full when charging. `None` when
-    /// idle, or while the gauge still reads zero draw right after a state change.
-    pub fn time_remaining(&self) -> Option<Duration> {
-        let power = self.power.filter(|p| *p > 0.1)?;
+    /// Time until empty when discharging, until full when charging, at the given
+    /// rate in watts. `None` when idle, or while the gauge still reads zero draw
+    /// right after a state change.
+    ///
+    /// The rate is a parameter rather than `self.power` because a single reading
+    /// swings with whatever the CPU is doing; callers pass the smoothed value
+    /// from `History::recent_power`.
+    pub fn time_remaining(&self, power: f64) -> Option<Duration> {
+        let power = (power > 0.1).then_some(power)?;
         let now = self.energy_now?;
         let hours = match self.status {
             Status::Discharging => now / power,
@@ -138,7 +143,7 @@ mod tests {
     #[test]
     fn discharging_drains_what_is_left() {
         let left = battery(Status::Discharging, 25.0, 10.0)
-            .time_remaining()
+            .time_remaining(10.0)
             .unwrap();
         assert_eq!(left.as_secs(), 9000);
     }
@@ -146,17 +151,29 @@ mod tests {
     #[test]
     fn charging_fills_the_gap() {
         let left = battery(Status::Charging, 25.0, 10.0)
-            .time_remaining()
+            .time_remaining(10.0)
             .unwrap();
         assert_eq!(left.as_secs(), 9000);
     }
 
     #[test]
+    fn the_estimate_follows_the_rate_it_is_given() {
+        // The smoothed rate, not the instantaneous one, decides the answer.
+        let battery = battery(Status::Discharging, 25.0, 50.0);
+        assert_eq!(battery.time_remaining(10.0).unwrap().as_secs(), 9000);
+        assert_eq!(battery.time_remaining(25.0).unwrap().as_secs(), 3600);
+    }
+
+    #[test]
     fn idle_and_zero_draw_have_no_estimate() {
-        assert!(battery(Status::Full, 50.0, 0.0).time_remaining().is_none());
         assert!(
-            battery(Status::Discharging, 25.0, 0.0)
-                .time_remaining()
+            battery(Status::Full, 50.0, 0.0)
+                .time_remaining(10.0)
+                .is_none()
+        );
+        assert!(
+            battery(Status::Discharging, 25.0, 10.0)
+                .time_remaining(0.0)
                 .is_none()
         );
     }
