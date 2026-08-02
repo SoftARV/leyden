@@ -121,6 +121,7 @@ src/
   main.rs              # RelmApp bootstrap, tracing, icon
   app.rs               # root Component: AppModel, AppMsg, update, view
   format.rs            # value -> label; every "—" in the UI starts here
+  graph.rs             # History -> Series -> cairo on a gtk::DrawingArea
   battery/
     mod.rs
     sysfs.rs           # /sys/class/power_supply -> Battery. Units resolved here.
@@ -133,7 +134,11 @@ Makefile               # make install -> ~/.local (no sudo); make check
 ```
 
 Dependency direction is strictly one-way: `main -> app -> battery/*`, and
-`app -> format`. `battery/` never imports gtk.
+`app -> {format, graph} -> battery/*`. `battery/` never imports gtk.
+
+The graph takes an **owned snapshot** (`Series::from_history`) rebuilt on each
+`#[watch]` pass, so the cairo draw closure needs no `Rc<RefCell<>>` — copying
+~900 points every two seconds is far cheaper than shared mutable state.
 
 ```rust
 struct AppModel {
@@ -160,8 +165,9 @@ This is Redux with a compiler: actions in, one reducer, view derived from state.
 - Content: an `adw::Clamp` (520) in a `gtk::ScrolledWindow` holding a hero block
   — status icon, the percentage in `.title-1 .numeric`, the headline line
   ("Charging · 1 h 12 min until full"), a `gtk::LevelBar` — then
-  `adw::PreferencesGroup`s: **Power** (draw/intake, charge, voltage, source) and
-  **Health** (capacity vs design, cycles, technology).
+  `adw::PreferencesGroup`s: **History** (the graph, described by the span it
+  covers), **Power** (draw/intake, charge, voltage, source) and **Health**
+  (capacity vs design, cycles, technology).
 - No battery: an `adw::StatusPage`. Missing value: `—`, never a blank or a zero.
 
 ## Scope
@@ -171,10 +177,14 @@ Issue-driven cadence — one small vertical slice, one PR each.
 - ✅ **M1** — Scaffold: sysfs read (both gauge flavours), live state / capacity /
   power / voltage / health / cycles, 2s poll with the suspend gate, icon +
   `.desktop` + installer, About.
-- **M2** — The graph. A `gtk::DrawingArea` over `History`: percentage against
-  time, coloured by charging vs discharging, with the current rate. Note
-  `Instant` does not advance across a system suspend — decide there whether a
-  gap is drawn as a gap or stitched.
+- ✅ **M2** — The graph: a `gtk::DrawingArea` over `History`, percentage against
+  wall-clock time, the line coloured green while charging and accent while
+  discharging. Samples are `SystemTime`-stamped (an `Instant` stands still
+  across a suspend, which would have drawn an overnight sleep as a vertical
+  drop), and a jump over `GAP_SECS` **breaks the line** rather than inventing a
+  slope — that gap is real, either a suspend or a hidden window with the timer
+  off. The x axis auto-fits the samples held, so the plot fills the width from
+  the first minute instead of creeping in from the right.
 - **M3** — Session estimates that beat the instantaneous reading: `power_now` is
   noisy, so smooth over the sample window for "time left" and "time to full".
 - **M4** — Persistence: keep history across launches (and therefore across

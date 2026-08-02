@@ -35,14 +35,6 @@ impl Status {
             Status::Unknown => "Unknown",
         }
     }
-
-    pub fn icon_name(self) -> &'static str {
-        match self {
-            Status::Charging => "battery-level-100-charging-symbolic",
-            Status::Full => "battery-level-100-charged-symbolic",
-            _ => "battery-symbolic",
-        }
-    }
 }
 
 /// One reading of one battery. Energies are Wh, power W, voltage V — the sysfs
@@ -65,6 +57,23 @@ pub struct Battery {
 }
 
 impl Battery {
+    /// The themed icon for this reading. Adwaita names these per 10% step, and
+    /// there is **no** `battery-level-100-charging-symbolic` — a full battery on
+    /// power is `charged`, not `charging`.
+    pub fn icon_name(&self) -> String {
+        let level = (self.percent / 10.0).round().clamp(0.0, 10.0) as u32 * 10;
+        let state = match self.status {
+            Status::Full => return "battery-level-100-charged-symbolic".to_owned(),
+            Status::Charging if level == 100 => {
+                return "battery-level-100-charged-symbolic".to_owned();
+            }
+            Status::Charging => "-charging",
+            Status::NotCharging | Status::Unknown if self.on_ac => "-plugged-in",
+            _ => "",
+        };
+        format!("battery-level-{level}{state}-symbolic")
+    }
+
     /// Usable capacity against the factory rating, as a percentage.
     pub fn health(&self) -> Option<f64> {
         let (full, design) = (self.energy_full?, self.energy_design?);
@@ -98,6 +107,26 @@ mod tests {
             power: Some(power),
             ..Battery::default()
         }
+    }
+
+    #[test]
+    fn icons_follow_the_level_and_never_ask_for_a_missing_name() {
+        let mut battery = battery(Status::Charging, 50.0, 10.0);
+        battery.percent = 47.0;
+        assert_eq!(battery.icon_name(), "battery-level-50-charging-symbolic");
+
+        // Adwaita has no 100-charging icon; a full battery on power is "charged".
+        battery.percent = 100.0;
+        assert_eq!(battery.icon_name(), "battery-level-100-charged-symbolic");
+
+        battery.status = Status::Discharging;
+        battery.percent = 3.0;
+        assert_eq!(battery.icon_name(), "battery-level-0-symbolic");
+
+        battery.status = Status::NotCharging;
+        battery.on_ac = true;
+        battery.percent = 62.0;
+        assert_eq!(battery.icon_name(), "battery-level-60-plugged-in-symbolic");
     }
 
     #[test]

@@ -8,7 +8,7 @@
 //! the network-bound siblings they happen inline in the reducer rather than in a
 //! relm4 command.
 
-use std::time::Instant;
+use std::time::{Duration, SystemTime};
 
 use relm4::actions::{AccelsPlus, RelmAction, RelmActionGroup};
 use relm4::adw::prelude::*;
@@ -19,6 +19,7 @@ use crate::battery::history::{History, Sample};
 use crate::battery::sysfs;
 use crate::battery::types::{Battery, Status};
 use crate::format;
+use crate::graph::Series;
 
 const POLL_SECS: u32 = 2;
 
@@ -47,9 +48,8 @@ impl AppModel {
         self.battery = sysfs::read();
         if let Some(battery) = &self.battery {
             self.history.push(Sample {
-                at: Instant::now(),
+                at: SystemTime::now(),
                 percent: battery.percent,
-                power: battery.power,
                 status: battery.status,
             });
         }
@@ -82,6 +82,12 @@ impl AppModel {
             })
     }
 
+    fn icon_name(&self) -> String {
+        self.battery
+            .as_ref()
+            .map_or_else(|| "battery-missing-symbolic".to_owned(), Battery::icon_name)
+    }
+
     fn percent_label(&self) -> String {
         self.battery
             .as_ref()
@@ -101,6 +107,17 @@ impl AppModel {
                 format!("Charging · {} until full", format::duration(left))
             }
             (status, _) => status.label().to_owned(),
+        }
+    }
+
+    /// The graph's caption. Below a minute there is nothing to read yet, so it
+    /// says so rather than drawing a misleading near-flat line.
+    fn history_caption(&self) -> String {
+        let span = self.history.span_secs();
+        if self.history.len() < 2 || span < 60.0 {
+            "Collecting samples…".to_owned()
+        } else {
+            format!("Last {}", format::duration(Duration::from_secs_f64(span)))
         }
     }
 
@@ -221,7 +238,7 @@ impl Component for AppModel {
                         set_hscrollbar_policy: gtk::PolicyType::Never,
 
                         adw::Clamp {
-                            set_maximum_size: 520,
+                            set_maximum_size: 540,
 
                             gtk::Box {
                                 set_orientation: gtk::Orientation::Vertical,
@@ -238,11 +255,7 @@ impl Component for AppModel {
                                         set_pixel_size: 48,
                                         set_margin_bottom: 4,
                                         #[watch]
-                                        set_icon_name: Some(
-                                            model.battery.as_ref()
-                                                .map_or(Status::Unknown, |b| b.status)
-                                                .icon_name()
-                                        ),
+                                        set_icon_name: Some(&model.icon_name()),
                                     },
 
                                     gtk::Label {
@@ -264,6 +277,20 @@ impl Component for AppModel {
                                         set_margin_top: 10,
                                         #[watch]
                                         set_value: model.level(),
+                                    },
+                                },
+
+                                adw::PreferencesGroup {
+                                    set_title: "History",
+                                    #[watch]
+                                    set_description: Some(&model.history_caption()),
+
+                                    gtk::DrawingArea {
+                                        set_height_request: 160,
+                                        add_css_class: "card",
+                                        #[watch]
+                                        set_draw_func: Series::from_history(&model.history)
+                                            .draw_func(),
                                     },
                                 },
 
