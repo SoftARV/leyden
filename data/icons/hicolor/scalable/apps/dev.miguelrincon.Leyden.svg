@@ -1,13 +1,35 @@
-<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <title>Leyden</title>
+  <desc>Direction A, the Leyden jar: narrow neck, flared glass lip, sloped shoulder and a broad body; brass terminal rod and knob through the stopper, stored charge as a fill level at y 92. Geometry on the 2px detail grid; silhouette x 24..104, y 8..116.</desc>
   <defs>
-    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#57e389"/>
-      <stop offset="1" stop-color="#26a269"/>
+    <linearGradient id="glass" x1="0" y1="36" x2="0" y2="116" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#99c1f1"></stop>
+      <stop offset="1" stop-color="#1c71d8"></stop>
     </linearGradient>
+    <linearGradient id="charge" x1="0" y1="92" x2="0" y2="116" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#33d17a"></stop>
+      <stop offset="1" stop-color="#2ec27e"></stop>
+    </linearGradient>
+    <radialGradient id="brass" cx="0.5" cy="0.26" r="0.78">
+      <stop offset="0" stop-color="#f6d32d"></stop>
+      <stop offset="1" stop-color="#e5a50a"></stop>
+    </radialGradient>
+    <clipPath id="jar-clip">
+      <path d="M 42 50 L 42 58 C 42 68 24 70 24 80 L 24 104 A 40 12 0 0 0 104 104 L 104 80 C 104 70 86 68 86 58 L 86 50 A 22 6 0 0 0 42 50 Z"></path>
+    </clipPath>
   </defs>
-  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#body)"/>
-  <rect x="25" y="40" width="66" height="48" rx="13" fill="none" stroke="#ffffff" stroke-width="7"/>
-  <rect x="95" y="54" width="8" height="20" rx="4" fill="#ffffff"/>
-  <path d="M62 48 L45 70 H57 L52 80 L73 57 H61 Z" fill="#ffffff"/>
+  <path id="glass-body" d="M 42 50 L 42 58 C 42 68 24 70 24 80 L 24 104 A 40 12 0 0 0 104 104 L 104 80 C 104 70 86 68 86 58 L 86 50 A 22 6 0 0 0 42 50 Z" fill="url(#glass)"></path>
+  <rect id="rod-inside-jar" x="60" y="50" width="8" height="44" fill="#e5a50a" opacity="0.5"></rect>
+  <g id="stored-charge" clip-path="url(#jar-clip)">
+    <rect id="charge-body" x="24" y="92" width="80" height="30" fill="url(#charge)"></rect>
+    <ellipse id="charge-surface" cx="64" cy="92" rx="38" ry="12" fill="#57e389"></ellipse>
+  </g>
+  <path id="front-profile" d="M 24 100 A 40 12 0 0 0 104 100 L 104 104 A 40 12 0 0 1 24 104 Z" fill="#26a269"></path>
+  <rect id="glass-highlight" x="34" y="78" width="6" height="24" rx="3" fill="#ffffff" opacity="0.3"></rect>
+  <path id="lip-side" d="M 36 44 L 36 50 A 28 8 0 0 0 92 50 L 92 44 Z" fill="#62a0ea"></path>
+  <ellipse id="lip-top" cx="64" cy="44" rx="28" ry="8" fill="#99c1f1"></ellipse>
+  <path id="stopper-side" d="M 44 40 L 44 44 A 20 6 0 0 0 84 44 L 84 40 Z" fill="#9a9996"></path>
+  <ellipse id="stopper-top" cx="64" cy="40" rx="20" ry="6" fill="#deddda"></ellipse>
+  <rect id="terminal-rod" x="60" y="18" width="8" height="24" fill="#e5a50a"></rect>
+  <circle id="terminal-knob" cx="64" cy="18" r="10" fill="url(#brass)"></circle>
 </svg>

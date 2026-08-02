@@ -31,11 +31,13 @@ install: build dev-install
 	install -Dm755 target/release/leyden $(BINDIR)/leyden
 	@echo "Installed to $(PREFIX). Launch 'Leyden' from the app grid, or run 'leyden'."
 
-# Everything except the release binary: the .desktop entry and the icon.
+# Everything except the release binary: the .desktop entry and the icons.
 dev-install:
 	install -Dm644 data/$(APPID).desktop $(DATADIR)/applications/$(APPID).desktop
 	install -Dm644 data/icons/hicolor/scalable/apps/$(APPID).svg \
 		$(DATADIR)/icons/hicolor/scalable/apps/$(APPID).svg
+	install -Dm644 data/icons/hicolor/symbolic/apps/$(APPID)-symbolic.svg \
+		$(DATADIR)/icons/hicolor/symbolic/apps/$(APPID)-symbolic.svg
 	@if [ -f $(DATADIR)/icons/hicolor/index.theme ]; then \
 		touch $(DATADIR)/icons/hicolor; \
 		gtk-update-icon-cache -q -t -f $(DATADIR)/icons/hicolor; \
@@ -46,6 +48,7 @@ uninstall:
 	rm -f $(BINDIR)/leyden
 	rm -f $(DATADIR)/applications/$(APPID).desktop
 	rm -f $(DATADIR)/icons/hicolor/scalable/apps/$(APPID).svg
+	rm -f $(DATADIR)/icons/hicolor/symbolic/apps/$(APPID)-symbolic.svg
 	@if [ -f $(DATADIR)/icons/hicolor/index.theme ]; then \
 		gtk-update-icon-cache -q -t -f $(DATADIR)/icons/hicolor; \
 	fi

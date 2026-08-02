@@ -130,6 +130,7 @@ src/
 data/
   dev.miguelrincon.Leyden.desktop
   icons/hicolor/scalable/apps/dev.miguelrincon.Leyden.svg
+  icons/hicolor/symbolic/apps/dev.miguelrincon.Leyden-symbolic.svg
 Makefile               # make install -> ~/.local (no sudo); make check
 ```
 
