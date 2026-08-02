@@ -1,0 +1,15 @@
+[package]
+name = "leyden"
+version = "0.1.0-dev"
+edition = "2024"
+description = "A native GNOME app to watch your laptop battery charge, drain and last"
+license = "GPL-3.0-or-later"
+readme = "README.md"
+
+[dependencies]
+# `gnome_49` == libadwaita 1.8 / GTK 4.20. Take gtk4/libadwaita *through* relm4 so
+# their versions can never drift apart; do not add them as direct dependencies.
+relm4 = { version = "0.11", features = ["libadwaita", "gnome_49"] }
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Leyden
+GenericName=Battery Monitor
+Comment=Watch your laptop battery charge, drain and last
+Exec=leyden
+Icon=dev.miguelrincon.Leyden
+Terminal=false
+Categories=System;Monitor;GTK;
+Keywords=Battery;Power;Charge;Energy;Watt;Laptop;
+StartupNotify=true
+StartupWMClass=dev.miguelrincon.Leyden
