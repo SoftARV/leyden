@@ -17,8 +17,9 @@ laptop, running GNOME.
 ## Status
 
 Early. The current build shows live battery state, charge, power, voltage,
-health and cycle count, polled from `/sys/class/power_supply` every two seconds.
-The charge/drain graph is next.
+health and cycle count, polled from `/sys/class/power_supply` every two seconds,
+plus a graph of the charge over the session — green while charging, accent while
+draining. History is not persisted yet, so the graph starts empty each launch.
 
 ## Install
 
