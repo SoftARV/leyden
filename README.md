@@ -9,6 +9,11 @@ the first device that could store an electric charge.
 Built with Rust, [relm4](https://relm4.org), GTK 4 and libadwaita — for one
 laptop, running GNOME.
 
+<p align="center">
+  <img src="docs/screenshots/overview.png" width="420"
+       alt="Leyden showing a battery at 32%, discharging with 1 h 12 min left, drawing 17.1 W">
+</p>
+
 ## Status
 
 Early. The current build shows live battery state, charge, power, voltage,
