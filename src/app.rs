@@ -26,6 +26,11 @@ const POLL_SECS: u32 = 2;
 /// 30 minutes of samples at `POLL_SECS`, the window the graph will draw.
 const HISTORY_CAP: usize = 900;
 
+/// Power is averaged over this trailing window before it drives an estimate. A
+/// single reading swings with whatever the CPU is doing that instant, which made
+/// "time left" jump by tens of minutes between polls.
+const SMOOTH_SECS: f64 = 120.0;
+
 relm4::new_action_group!(AppActionGroup, "win");
 relm4::new_stateless_action!(AboutAction, AppActionGroup, "about");
 relm4::new_stateless_action!(QuitAction, AppActionGroup, "quit");
@@ -50,6 +55,7 @@ impl AppModel {
             self.history.push(Sample {
                 at: SystemTime::now(),
                 percent: battery.percent,
+                power: battery.power,
                 status: battery.status,
             });
         }
@@ -94,12 +100,23 @@ impl AppModel {
             .map_or_else(|| format::EMPTY.to_owned(), |b| format::percent(b.percent))
     }
 
+    /// The rate the estimates run on: the trailing average, falling back to the
+    /// live reading until there is enough history to average.
+    fn smoothed_power(&self) -> Option<f64> {
+        self.history
+            .recent_power(SMOOTH_SECS)
+            .or_else(|| self.battery.as_ref().and_then(|b| b.power))
+    }
+
     /// "Charging · 1 h 12 min until full" — the headline the app exists for.
     fn status_label(&self) -> String {
         let Some(battery) = &self.battery else {
             return String::new();
         };
-        match (battery.status, battery.time_remaining()) {
+        let remaining = self
+            .smoothed_power()
+            .and_then(|power| battery.time_remaining(power));
+        match (battery.status, remaining) {
             (Status::Discharging, Some(left)) => {
                 format!("Discharging · {} left", format::duration(left))
             }
@@ -135,6 +152,21 @@ impl AppModel {
 
     fn power_label(&self) -> String {
         format::unit(self.battery.as_ref().and_then(|b| b.power), 1, "W")
+    }
+
+    /// Shown only once the average has drifted from the live reading — until
+    /// then it would just repeat the number on the right of the same row.
+    fn power_subtitle(&self) -> String {
+        let (Some(average), Some(live)) = (
+            self.history.recent_power(SMOOTH_SECS),
+            self.battery.as_ref().and_then(|b| b.power),
+        ) else {
+            return String::new();
+        };
+        if (average - live).abs() < 0.1 {
+            return String::new();
+        }
+        format!("{average:.1} W average")
     }
 
     fn voltage_label(&self) -> String {
@@ -300,6 +332,8 @@ impl Component for AppModel {
                                     adw::ActionRow {
                                         #[watch]
                                         set_title: model.power_title(),
+                                        #[watch]
+                                        set_subtitle: &model.power_subtitle(),
                                         add_suffix = &gtk::Label {
                                             add_css_class: "dim-label",
                                             add_css_class: "numeric",
