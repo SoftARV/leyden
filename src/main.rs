@@ -6,6 +6,7 @@ mod battery;
 mod format;
 mod graph;
 mod notify;
+mod recordings;
 mod settings;
 mod sleep;
 mod store;
