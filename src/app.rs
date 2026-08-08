@@ -1074,8 +1074,48 @@ fn shortcuts_dialog() -> adw::ShortcutsDialog {
     dialog
 }
 
+/// The plot inside an expanded run. Its shape comes from the run's own stored
+/// series, so a run stays drawable long after its samples have aged out.
+fn recording_graph(run: &Run, twelve_hour: bool) -> gtk::Widget {
+    let series = Series::from_points(
+        &run.series,
+        run.started,
+        run.kind == Kind::Charge,
+        twelve_hour,
+    );
+
+    let area = gtk::DrawingArea::builder()
+        .height_request(120)
+        .hexpand(true)
+        .css_classes(["card"])
+        .build();
+    let readout = gtk::Label::builder()
+        .label(IDLE_READOUT)
+        .margin_top(6)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .css_classes(["dim-label", "numeric", "caption"])
+        .build();
+
+    // The same `Plot` the main graph uses, so a run reads back exactly the way
+    // the live plot does — including over its gaps.
+    let plot = Plot::default();
+    area.set_draw_func(plot.refreshed(series));
+    plot.install_readout(&area, &readout);
+
+    let wrapper = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .margin_top(6)
+        .margin_bottom(12)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    wrapper.append(&area);
+    wrapper.append(&readout);
+    wrapper.upcast()
+}
+
 /// One run: where the charge went, and how long it took to get there.
-fn recording_row(run: &Run, twelve_hour: bool) -> adw::ActionRow {
+fn recording_row(run: &Run, twelve_hour: bool) -> adw::PreferencesRow {
     let title = format!(
         "{}% → {}%",
         run.from_percent.round() as i64,
@@ -1098,16 +1138,33 @@ fn recording_row(run: &Run, twelve_hour: bool) -> adw::ActionRow {
         subtitle.push_str(&format!(" · {watts:.1} W"));
     }
 
-    let row = adw::ActionRow::builder()
+    let badge = || {
+        gtk::Label::builder()
+            .label("in progress")
+            .css_classes(["dim-label", "caption"])
+            .build()
+    };
+
+    // A run with no stored shape — an older line — has nothing to expand into,
+    // so it stays a plain row rather than offering an empty drawer.
+    if run.series.len() < 2 {
+        let row = adw::ActionRow::builder()
+            .title(title)
+            .subtitle(subtitle)
+            .build();
+        if run.in_progress {
+            row.add_suffix(&badge());
+        }
+        return row.upcast();
+    }
+
+    let row = adw::ExpanderRow::builder()
         .title(title)
         .subtitle(subtitle)
         .build();
     if run.in_progress {
-        let badge = gtk::Label::builder()
-            .label("in progress")
-            .css_classes(["dim-label", "caption"])
-            .build();
-        row.add_suffix(&badge);
+        row.add_suffix(&badge());
     }
-    row
+    row.add_row(&recording_graph(run, twelve_hour));
+    row.upcast()
 }

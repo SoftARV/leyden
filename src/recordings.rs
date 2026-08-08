@@ -7,10 +7,14 @@
 //! and a day is not five cycles. So runs are summarised into their own small
 //! file, which is tiny and long-lived where samples are bulky and short-lived.
 //!
-//! Each run carries **its own series**, resampled to at most `SERIES_POINTS`
-//! evenly spaced percentages. That keeps a run drawable long after its samples
-//! have aged out of the ring, and because the points are evenly spaced by
-//! construction they need no timestamps of their own.
+//! Each run carries **its own series** — at most `SERIES_POINTS` pairs of
+//! `offset:percent` — so it stays drawable long after its samples have aged out
+//! of the ring.
+//!
+//! The offsets are kept rather than resampled onto an even grid. An even grid
+//! has to invent a value for every slot, including the slots inside a gap, so a
+//! discharge containing an eight-hour sleep drew exactly like one that did not.
+//! Downsampling by stride keeps real observations and lets a gap stay a gap.
 //!
 //! `runs_in` is a pure function over a `History`, which is what makes the rules
 //! below testable — every one of them came from replaying real data rather than
@@ -82,8 +86,9 @@ pub struct Run {
     pub to_percent: f64,
     /// Mean of the readings taken during the run, in watts.
     pub watts: Option<f64>,
-    /// Percentages across the run, evenly spaced from `started` to `ended`.
-    pub series: Vec<f64>,
+    /// `(seconds from the start, percent)` — real observations, thinned but not
+    /// interpolated, so the gaps within a run survive.
+    pub series: Vec<(f64, f64)>,
     /// Still running: `ended` is simply the newest reading so far.
     pub in_progress: bool,
 }
@@ -196,11 +201,16 @@ impl Open {
         }
     }
 
-    fn finish(self, ending: Option<&Sample>, in_progress: bool) -> Run {
+    fn finish(mut self, ending: Option<&Sample>, in_progress: bool) -> Run {
         // The reading that ended the run is its endpoint: a charge that stopped
-        // because the battery filled should read as reaching 100%.
+        // because the battery filled should read as reaching 100% — and its
+        // shape has to reach 100% too, or the row and the graph disagree.
         let (ended, to_percent) = match ending {
-            Some(sample) => (sample.at, sample.percent),
+            Some(sample) => {
+                self.points
+                    .push((elapsed_secs(self.started, sample.at), sample.percent));
+                (sample.at, sample.percent)
+            }
             None => (self.last, self.last_percent),
         };
         let watts = (!self.watts.is_empty())
@@ -212,33 +222,31 @@ impl Open {
             from_percent: self.from_percent,
             to_percent,
             watts,
-            series: resample(&self.points, elapsed_secs(self.started, ended)),
+            series: downsample(&self.points),
             in_progress,
         }
     }
 }
 
-/// Flatten irregularly spaced points onto a fixed number of evenly spaced ones,
-/// so a stored run needs no timestamps to be drawn.
-fn resample(points: &[(f64, f64)], span: f64) -> Vec<f64> {
-    if points.is_empty() {
-        return Vec::new();
+/// Thin the points to at most `SERIES_POINTS`, keeping every one that survives
+/// as an actual observation.
+///
+/// Deliberately not an interpolation onto an even grid: that has to invent a
+/// value for every slot, gaps included, which is precisely the information a run
+/// graph should not lose.
+fn downsample(points: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    if points.len() <= SERIES_POINTS {
+        return points.to_vec();
     }
-    if points.len() <= 2 || span <= 0.0 {
-        return points.iter().map(|(_, percent)| *percent).collect();
+    let stride = points.len().div_ceil(SERIES_POINTS);
+    let mut thinned: Vec<(f64, f64)> = points.iter().step_by(stride).copied().collect();
+    // The end of a run is its most interesting point; never let stride drop it.
+    if let (Some(last), Some(kept)) = (points.last(), thinned.last())
+        && last != kept
+    {
+        thinned.push(*last);
     }
-
-    let count = SERIES_POINTS.min(points.len());
-    (0..count)
-        .map(|step| {
-            let at = span * step as f64 / (count - 1).max(1) as f64;
-            // Nearest observed point; the series is a shape, not an interpolation.
-            points
-                .iter()
-                .min_by(|a, b| (a.0 - at).abs().total_cmp(&(b.0 - at).abs()))
-                .map_or(0.0, |(_, percent)| *percent)
-        })
-        .collect()
+    thinned
 }
 
 fn path() -> PathBuf {
@@ -335,7 +343,7 @@ fn line(run: &Run) -> Option<String> {
     let series: Vec<String> = run
         .series
         .iter()
-        .map(|percent| format!("{percent:.1}"))
+        .map(|(at, percent)| format!("{at:.0}:{percent:.1}"))
         .collect();
     Some(format!(
         "{}\t{started}\t{ended}\t{:.1}\t{:.1}\t{watts}\t{}\n",
@@ -357,13 +365,19 @@ fn parse(line: &str) -> Option<Run> {
         "-" => None,
         watts => Some(watts.parse().ok()?),
     };
+    // Pairs only. A line from the first format stored bare percentages with no
+    // offsets; those cannot say where a gap was, so they load as no series at
+    // all and the run simply shows without a plot.
     let series = fields
         .next()
         .map(|series| {
             series
                 .trim()
                 .split(',')
-                .filter_map(|percent| percent.parse().ok())
+                .filter_map(|point| {
+                    let (at, percent) = point.split_once(':')?;
+                    Some((at.parse().ok()?, percent.parse().ok()?))
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -443,6 +457,12 @@ mod tests {
         assert_eq!(runs[0].kind, Kind::Charge);
         assert_eq!(runs[0].to_percent, 100.0, "it reached full");
         assert!(!runs[0].in_progress, "full closed it");
+        // The graph has to agree with the row it sits under.
+        assert_eq!(
+            runs[0].series.last().map(|(_, percent)| *percent),
+            Some(100.0),
+            "the shape reaches full too"
+        );
     }
 
     #[test]
@@ -490,7 +510,7 @@ mod tests {
             from_percent: 80.0,
             to_percent: 40.0,
             watts: Some(11.25),
-            series: vec![80.0, 60.0, 40.0],
+            series: vec![(0.0, 80.0), (1800.0, 60.0), (3600.0, 40.0)],
             in_progress,
         }
     }
@@ -506,6 +526,11 @@ mod tests {
         assert_eq!(bare.kind, Kind::Charge);
         assert!(bare.series.is_empty());
         assert_eq!(bare.watts, None);
+
+        // A line in the first format — bare percentages, no offsets — cannot say
+        // where its gaps were, so it loads with no series rather than a lie.
+        let old = parse("charge\t100\t200\t10.0\t20.0\t-\t80.0,60.0,40.0").unwrap();
+        assert!(old.series.is_empty());
 
         assert!(parse("nonsense\t1\t2\t3\t4\t5").is_none());
     }
@@ -537,13 +562,37 @@ mod tests {
     }
 
     #[test]
+    fn a_gap_inside_a_run_survives_the_thinning() {
+        // A discharge interrupted by a long sleep: the stored shape must still
+        // show that nothing was observed in the middle.
+        let mut entries = walk(0, 40, 80.0, -0.25, Status::Discharging);
+        let mut after = walk(30_000, 40, 60.0, -0.25, Status::Discharging);
+        after[0].3 = Follows::Sleep;
+        entries.extend(after);
+
+        let runs = runs_in(&history_of(&entries));
+        assert_eq!(runs.len(), 1, "one discharge across the sleep");
+
+        let biggest = runs[0]
+            .series
+            .windows(2)
+            .map(|pair| pair[1].0 - pair[0].0)
+            .fold(0.0_f64, f64::max);
+        assert!(
+            biggest > 20_000.0,
+            "the unobserved stretch must survive as a real jump, got {biggest}"
+        );
+    }
+
+    #[test]
     fn a_run_carries_its_own_shape_and_rate() {
         let runs = runs_in(&history_of(&walk(0, 120, 80.0, -0.25, Status::Discharging)));
         let run = &runs[0];
 
         assert!(run.series.len() <= SERIES_POINTS);
         assert!(run.series.len() > 2, "enough points to draw");
-        assert_eq!(run.series.first().copied(), Some(80.0));
+        assert_eq!(run.series.first().map(|(_, percent)| *percent), Some(80.0));
+        assert_eq!(run.series.first().map(|(at, _)| *at), Some(0.0));
         assert!((run.watts.unwrap() - 10.0).abs() < 0.001);
         // 29.75% over 59.5 minutes is very close to 30%/h.
         assert!((run.rate().unwrap() - 30.0).abs() < 0.5, "{:?}", run.rate());
