@@ -15,13 +15,14 @@ use relm4::adw::prelude::*;
 use relm4::gtk::{gio, glib};
 use relm4::{Component, ComponentParts, ComponentSender, RelmWidgetExt, adw, gtk};
 
-use crate::battery::history::{self, History, Sample};
+use crate::battery::history::{self, Follows, History, Sample};
 use crate::battery::sysfs;
 use crate::battery::types::{Battery, Status};
 use crate::format;
 use crate::graph::{IDLE_READOUT, Plot, Series};
 use crate::notify::{self, Alerts};
 use crate::settings::{Clock, MAX_POLL_SECS, MIN_POLL_SECS, Settings, Theme};
+use crate::sleep::{self, Clocks};
 use crate::store;
 
 /// While nothing is on screen the app records but does not display, so it polls
@@ -79,6 +80,13 @@ pub struct AppModel {
     hidden: bool,
     settings: Settings,
     alerts: Alerts,
+    clocks: Clocks,
+    /// What the next sample should record as preceding it. Set to `Launch` at
+    /// startup so the stretch since the last session is named, and to `Sleep`
+    /// when a suspend is noticed; consumed by the next sample.
+    next_follows: Follows,
+    /// Held for the life of the process; dropping it unsubscribes from logind.
+    sleep_watch: Option<sleep::Watcher>,
     /// Shared with the graph's draw and hover callbacks — see `graph::Plot`.
     plot: Plot,
 }
@@ -100,6 +108,9 @@ pub enum AppMsg {
     SetAlerts(bool),
     SetClock(Clock),
     SetBackground(bool),
+    /// logind's `PrepareForSleep`: `true` just before the freeze, `false` on
+    /// resume.
+    SleepSignal(bool),
 }
 
 /// Results from off-thread work. Disk I/O never happens in `update` (rule 3);
@@ -122,6 +133,7 @@ impl AppModel {
             percent: battery.percent,
             power: battery.power,
             status: battery.status,
+            follows: std::mem::take(&mut self.next_follows),
         };
 
         // Always advanced, even with alerts switched off, so turning them on
@@ -660,6 +672,11 @@ impl Component for AppModel {
             hidden: !root.is_visible(),
             settings,
             alerts: Alerts::default(),
+            clocks: Clocks::default(),
+            // The first reading of a session closes the stretch in which the app
+            // was not running.
+            next_follows: Follows::Launch,
+            sleep_watch: None,
             plot: Plot::default(),
         };
         model.sample(&sender);
@@ -667,6 +684,11 @@ impl Component for AppModel {
         let widgets = view_output!();
 
         model.plot.install_readout(&widgets.graph, &widgets.readout);
+
+        let sleeping = sender.input_sender().clone();
+        model.sleep_watch = sleep::watch_logind(move |going_to_sleep| {
+            sleeping.send(AppMsg::SleepSignal(going_to_sleep)).ok();
+        });
 
         let menu = gio::Menu::new();
         menu.append(Some("Preferences"), Some("win.preferences"));
@@ -771,7 +793,13 @@ impl Component for AppModel {
 
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, root: &Self::Root) {
         match msg {
-            AppMsg::Tick => self.sample(&sender),
+            AppMsg::Tick => {
+                if let Some(slept) = self.clocks.advance() {
+                    tracing::debug!("machine slept for {slept:?}");
+                    self.next_follows = Follows::Sleep;
+                }
+                self.sample(&sender);
+            }
 
             AppMsg::PresenceChanged => {
                 let hidden = !root.is_visible() || root.is_suspended();
@@ -784,6 +812,18 @@ impl Component for AppModel {
                         self.sample(&sender);
                     }
                     self.restart_poll(&sender);
+                }
+            }
+
+            AppMsg::SleepSignal(going_to_sleep) => {
+                // logind gives a moment either side of the freeze, which is the
+                // only way to get endpoints that are not a poll interval stale.
+                if going_to_sleep {
+                    self.sample(&sender);
+                } else {
+                    self.next_follows = Follows::Sleep;
+                    self.clocks.reset();
+                    self.sample(&sender);
                 }
             }
 
@@ -807,6 +847,9 @@ impl Component for AppModel {
                 let secs = secs.clamp(MIN_POLL_SECS, MAX_POLL_SECS);
                 if secs != self.settings.poll_secs {
                     self.settings.poll_secs = secs;
+                    // A changed interval makes the next quiet stretch expected,
+                    // not suspicious.
+                    self.clocks.reset();
                     self.restart_poll(&sender);
                     self.save_settings(&sender);
                 }

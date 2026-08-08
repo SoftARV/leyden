@@ -4,9 +4,13 @@
 //! The history file: `~/.local/share/leyden/history.tsv`.
 //!
 //! One sample per line, tab separated — `unix_secs`, percent, watts (`-` when
-//! the gauge gave nothing) and the status key. Plain text because the record is
-//! four scalars: JSON would mean a serde dependency for no gain, and the file
-//! stays greppable and diffable.
+//! the gauge gave nothing), the status key, and an optional marker. Plain text
+//! because the record is a handful of scalars: JSON would mean a serde
+//! dependency for no gain, and the file stays greppable and diffable.
+//!
+//! The marker column was added after the format was already on disk. Lines
+//! written before it simply lack a fifth field, and `parse` reads what it needs
+//! and ignores the rest — so old files load unchanged.
 //!
 //! Appending is the normal path; the file is compacted on load, which is the
 //! only time anything old is dropped. Unparseable lines are skipped rather than
@@ -22,7 +26,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use relm4::gtk::glib;
 
-use crate::battery::history::Sample;
+use crate::battery::history::{Follows, Sample};
 use crate::battery::types::Status;
 
 /// Samples older than this are dropped when the file is read, and the file is
@@ -121,8 +125,9 @@ fn line(sample: &Sample) -> Option<String> {
     let power = sample
         .power
         .map_or_else(|| "-".to_owned(), |watts| format!("{watts:.2}"));
+    let marker = sample.follows.as_key();
     Some(format!(
-        "{secs}\t{:.1}\t{power}\t{}\n",
+        "{secs}\t{:.1}\t{power}\t{}\t{marker}\n",
         sample.percent,
         sample.status.as_key()
     ))
@@ -137,11 +142,16 @@ fn parse(line: &str) -> Option<Sample> {
         watts => Some(watts.parse().ok()?),
     };
     let status = Status::from_key(fields.next()?.trim());
+    // Absent on every line written before the marker existed.
+    let follows = fields
+        .next()
+        .map_or(Follows::Poll, |marker| Follows::from_key(marker.trim()));
     Some(Sample {
         at: UNIX_EPOCH + Duration::from_secs(secs),
         percent,
         power,
         status,
+        follows,
     })
 }
 
@@ -155,13 +165,14 @@ mod tests {
             percent: 41.5,
             power,
             status: Status::Charging,
+            follows: Follows::Poll,
         }
     }
 
     #[test]
     fn a_sample_survives_a_round_trip() {
         let written = line(&sample(1_780_000_000, Some(68.031))).unwrap();
-        assert_eq!(written, "1780000000\t41.5\t68.03\tcharging\n");
+        assert_eq!(written, "1780000000\t41.5\t68.03\tcharging\t\n");
 
         let read = parse(written.trim_end()).unwrap();
         assert_eq!(read.at, sample(1_780_000_000, None).at);
@@ -175,6 +186,23 @@ mod tests {
         let written = line(&sample(1_780_000_000, None)).unwrap();
         assert!(written.contains("\t-\t"));
         assert_eq!(parse(written.trim_end()).unwrap().power, None);
+    }
+
+    #[test]
+    fn markers_round_trip_and_old_lines_still_load() {
+        for follows in [Follows::Sleep, Follows::Launch, Follows::Poll] {
+            let mut marked = sample(1_780_000_000, None);
+            marked.follows = follows;
+            let written = line(&marked).unwrap();
+            assert_eq!(parse(written.trim_end()).unwrap().follows, follows);
+        }
+
+        // A line from before the column existed: four fields, no marker.
+        let old = parse("1780000000\t41.5\t-\tcharging").unwrap();
+        assert_eq!(old.follows, Follows::Poll);
+        // An unrecognised marker is not a reason to drop the reading.
+        let future = parse("1780000000\t41.5\t-\tcharging\thibernated").unwrap();
+        assert_eq!(future.follows, Follows::Poll);
     }
 
     #[test]

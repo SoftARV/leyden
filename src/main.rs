@@ -7,6 +7,7 @@ mod format;
 mod graph;
 mod notify;
 mod settings;
+mod sleep;
 mod store;
 
 use relm4::RelmApp;

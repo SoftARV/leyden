@@ -31,12 +31,47 @@ pub fn elapsed_secs(from: SystemTime, to: SystemTime) -> f64 {
         .map_or(0.0, |elapsed| elapsed.as_secs_f64())
 }
 
+/// What came before a reading, when it was not simply the previous poll. The
+/// stretch in front of such a sample is a gap, and this is what it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Follows {
+    /// The ordinary case: the poll before this one.
+    #[default]
+    Poll,
+    /// The machine was suspended.
+    Sleep,
+    /// The app was not running — this is a session's first reading.
+    Launch,
+}
+
+impl Follows {
+    /// The stable string written to the history file's marker column.
+    pub fn as_key(self) -> &'static str {
+        match self {
+            Follows::Poll => "",
+            Follows::Sleep => "woke",
+            Follows::Launch => "start",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Self {
+        match key {
+            "woke" => Follows::Sleep,
+            "start" => Follows::Launch,
+            _ => Follows::Poll,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Sample {
     pub at: SystemTime,
     pub percent: f64,
     pub power: Option<f64>,
     pub status: Status,
+    /// What preceded this reading. Persisted, so a gap keeps its explanation
+    /// across a restart.
+    pub follows: Follows,
 }
 
 #[derive(Debug)]
@@ -162,6 +197,7 @@ mod tests {
             percent,
             power: None,
             status: Status::Discharging,
+            follows: Follows::Poll,
         }
     }
 
@@ -173,6 +209,7 @@ mod tests {
                 percent: 50.0,
                 power: Some(*power),
                 status: *status,
+                follows: Follows::Poll,
             });
         }
         history
@@ -198,6 +235,7 @@ mod tests {
                 percent: 50.0,
                 power: None,
                 status: Status::Discharging,
+                follows: Follows::Poll,
             });
         }
         assert_eq!(history.span_secs(), 90.0);
