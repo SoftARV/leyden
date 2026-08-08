@@ -24,11 +24,6 @@ pub fn now() -> SystemTime {
     )
 }
 
-/// Samples further apart than this did not just miss a poll — the machine slept
-/// or the window was hidden and the timer came off. Nothing may be interpolated
-/// or averaged across such a gap.
-pub const GAP_SECS: f64 = 15.0;
-
 /// Seconds from `from` to `to`, clamped at zero so a clock stepping backwards
 /// cannot produce a negative x coordinate.
 pub fn elapsed_secs(from: SystemTime, to: SystemTime) -> f64 {
@@ -120,8 +115,12 @@ impl History {
     /// Mean power over the trailing `window_secs`, walking back from the newest
     /// sample and stopping at the first thing that would poison the average: a
     /// different `Status` (a charge rate says nothing about a drain rate) or a
-    /// gap (the samples either side of a suspend are not neighbours in time).
-    pub fn recent_power(&self, window_secs: f64) -> Option<f64> {
+    /// gap wider than `gap_secs` (the samples either side of a suspend are not
+    /// neighbours in time).
+    ///
+    /// `gap_secs` is a parameter because it only means anything relative to how
+    /// often this particular ring is fed — see the callers.
+    pub fn recent_power(&self, window_secs: f64, gap_secs: f64) -> Option<f64> {
         let newest = self.samples.back()?;
         let mut total = 0.0;
         let mut count = 0usize;
@@ -129,7 +128,7 @@ impl History {
 
         for sample in self.samples.iter().rev() {
             if sample.status != newest.status
-                || elapsed_secs(sample.at, later) > GAP_SECS
+                || elapsed_secs(sample.at, later) > gap_secs
                 || elapsed_secs(sample.at, newest.at) > window_secs
             {
                 break;
@@ -211,7 +210,7 @@ mod tests {
             (2, 20.0, Status::Discharging),
             (4, 30.0, Status::Discharging),
         ]);
-        assert_eq!(history.recent_power(60.0), Some(20.0));
+        assert_eq!(history.recent_power(60.0, 15.0), Some(20.0));
     }
 
     #[test]
@@ -222,7 +221,7 @@ mod tests {
             (60, 20.0, Status::Discharging),
         ]);
         // The 100 W sample is 60s back — outside a 30s window, so it is dropped.
-        assert_eq!(history.recent_power(30.0), Some(15.0));
+        assert_eq!(history.recent_power(30.0, 15.0), Some(15.0));
     }
 
     #[test]
@@ -233,7 +232,7 @@ mod tests {
             (4, 12.0, Status::Discharging),
         ]);
         // Unplugging must not blend 60 W of charging into the drain estimate.
-        assert_eq!(history.recent_power(600.0), Some(12.0));
+        assert_eq!(history.recent_power(600.0, 15.0), Some(12.0));
     }
 
     #[test]
@@ -243,7 +242,7 @@ mod tests {
             (2, 40.0, Status::Discharging),
             (7200, 10.0, Status::Discharging),
         ]);
-        assert_eq!(history.recent_power(f64::MAX), Some(10.0));
+        assert_eq!(history.recent_power(f64::MAX, 15.0), Some(10.0));
     }
 
     #[test]
@@ -299,7 +298,7 @@ mod tests {
     fn power_is_none_without_readings() {
         let mut history = History::new(4);
         history.push(sample(50.0));
-        assert_eq!(history.recent_power(60.0), None);
-        assert_eq!(History::new(4).recent_power(60.0), None);
+        assert_eq!(history.recent_power(60.0, 15.0), None);
+        assert_eq!(History::new(4).recent_power(60.0, 15.0), None);
     }
 }
