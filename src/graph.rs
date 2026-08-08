@@ -291,8 +291,9 @@ impl Series {
         series
     }
 
-    /// A series from a stored run: `(offset, percent)` pairs kept as observed,
-    /// so the stretches nothing was recorded in are still stretches.
+    /// A series from a stored run: `(offset, percent, what preceded it)` kept as
+    /// observed, so the stretches nothing was recorded in are still stretches —
+    /// and still say which kind they were.
     ///
     /// Takes plain numbers rather than a `Run` so the graph stays below
     /// `recordings` in the dependency order and knows nothing about it.
@@ -302,7 +303,7 @@ impl Series {
     /// knows it. Three times the **median** spacing — median so the one long gap
     /// cannot raise the bar it is meant to trip.
     pub fn from_points(
-        points: &[(f64, f64)],
+        points: &[(f64, f64, Follows)],
         started: SystemTime,
         charging: bool,
         twelve_hour: bool,
@@ -311,7 +312,7 @@ impl Series {
             twelve_hour,
             ..Series::default()
         };
-        let (Some((first, _)), Some((last, _))) = (points.first(), points.last()) else {
+        let (Some((first, ..)), Some((last, ..))) = (points.first(), points.last()) else {
             return series;
         };
         if points.len() < 2 || last <= first {
@@ -328,13 +329,16 @@ impl Series {
 
         let gap_secs = median_spacing(points) * 3.0;
         let mut previous: Option<Point> = None;
-        for (at, percent) in points {
+        for (at, percent, follows) in points {
             let point = Point {
                 at: at - first,
                 percent: *percent,
                 status,
                 power: None,
             };
+            // Detection stays purely temporal, exactly as `from_history` does
+            // it, so identical data cannot show more gaps here than on the main
+            // plot. The marker only decides what a gap is *called*.
             let gap = previous.is_some_and(|last| point.at - last.at > gap_secs);
             if let Some(last) = previous
                 && gap
@@ -342,7 +346,7 @@ impl Series {
                 series.gaps.push(Gap {
                     from: last,
                     to: point,
-                    kind: GapKind::Unexplained,
+                    kind: GapKind::of(*follows),
                 });
             }
             if previous.is_none() || gap {
@@ -564,7 +568,7 @@ impl Series {
 
 /// The middle spacing between consecutive points, which a single long gap
 /// cannot skew the way a mean would.
-fn median_spacing(points: &[(f64, f64)]) -> f64 {
+fn median_spacing(points: &[(f64, f64, Follows)]) -> f64 {
     let mut spacings: Vec<f64> = points
         .windows(2)
         .map(|pair| pair[1].0 - pair[0].0)
@@ -828,8 +832,8 @@ mod tests {
 
     #[test]
     fn a_stored_run_spans_the_plot_and_paints() {
-        let points: Vec<(f64, f64)> = (0..40)
-            .map(|step| (step as f64 * 90.0, 80.0 - step as f64 * 0.5))
+        let points: Vec<(f64, f64, Follows)> = (0..40)
+            .map(|step| (step as f64 * 90.0, 80.0 - step as f64 * 0.5, Follows::Poll))
             .collect();
         let series = Series::from_points(&points, SystemTime::UNIX_EPOCH, false, false);
 
@@ -850,28 +854,46 @@ mod tests {
     #[test]
     fn a_gap_inside_a_stored_run_is_drawn_as_one() {
         // Twenty minutes observed, eight hours of nothing, twenty more.
-        let mut points: Vec<(f64, f64)> = (0..20)
-            .map(|step| (step as f64 * 60.0, 80.0 - step as f64 * 0.2))
+        let mut points: Vec<(f64, f64, Follows)> = (0..20)
+            .map(|step| (step as f64 * 60.0, 80.0 - step as f64 * 0.2, Follows::Poll))
             .collect();
-        points
-            .extend((0..20).map(|step| (30_000.0 + step as f64 * 60.0, 68.0 - step as f64 * 0.2)));
+        points.extend((0..20).map(|step| {
+            (
+                30_000.0 + step as f64 * 60.0,
+                68.0 - step as f64 * 0.2,
+                if step == 0 {
+                    Follows::Sleep
+                } else {
+                    Follows::Poll
+                },
+            )
+        }));
 
         let series = Series::from_points(&points, SystemTime::UNIX_EPOCH, false, false);
         assert_eq!(series.gaps.len(), 1, "the unobserved stretch is a gap");
         assert_eq!(series.segments.len(), 2, "and it breaks the line");
+        // And it says which kind it was, rather than shrugging.
+        assert_eq!(series.gaps[0].kind, GapKind::Asleep);
+        assert!(series.gaps[0].describe().starts_with("Asleep"));
         assert!(series.describe(120.0, 240.0).is_some());
     }
 
     #[test]
     fn a_run_too_short_to_draw_yields_an_empty_series() {
         assert_eq!(
-            Series::from_points(&[(0.0, 80.0)], SystemTime::UNIX_EPOCH, false, false).points(),
+            Series::from_points(
+                &[(0.0, 80.0, Follows::Poll)],
+                SystemTime::UNIX_EPOCH,
+                false,
+                false
+            )
+            .points(),
             0
         );
         // No span, no shape.
         assert_eq!(
             Series::from_points(
-                &[(5.0, 80.0), (5.0, 70.0)],
+                &[(5.0, 80.0, Follows::Poll), (5.0, 70.0, Follows::Poll)],
                 SystemTime::UNIX_EPOCH,
                 true,
                 false

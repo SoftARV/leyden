@@ -270,6 +270,14 @@ impl AppModel {
 
     /// The last few runs of each kind, in their own dialog.
     fn recordings_dialog(&self) -> adw::Dialog {
+        // Derived fresh, not read straight off the model: `refresh_recordings`
+        // only runs where a trend changes, because that is the only moment a run
+        // can *complete*. The run in progress moves continuously, so it is
+        // recomputed here — once per opening, and without touching the file,
+        // since nothing in progress is ever persisted.
+        let mut view = self.recordings.clone();
+        recordings::merge(&mut view, recordings::runs_in(&self.history));
+
         let stack = adw::ViewStack::new();
         for (kind, title, icon) in [
             (Kind::Discharge, "Discharges", "battery-level-30-symbolic"),
@@ -279,7 +287,7 @@ impl AppModel {
                 "battery-level-50-charging-symbolic",
             ),
         ] {
-            let page = self.recordings_page(kind, title);
+            let page = self.recordings_page(&view, kind, title);
             stack.add_titled_with_icon(&page, Some(kind.as_key()), title, icon);
         }
 
@@ -303,8 +311,8 @@ impl AppModel {
             .build()
     }
 
-    fn recordings_page(&self, kind: Kind, title: &str) -> gtk::Widget {
-        let runs = recordings::latest(&self.recordings, kind);
+    fn recordings_page(&self, view: &[Run], kind: Kind, title: &str) -> gtk::Widget {
+        let runs = recordings::latest(view, kind);
         if runs.is_empty() {
             let empty = adw::StatusPage::builder()
                 .icon_name("document-open-recent-symbolic")
