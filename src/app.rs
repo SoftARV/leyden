@@ -8,23 +8,34 @@
 //! the network-bound siblings they happen inline in the reducer rather than in a
 //! relm4 command.
 
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use relm4::actions::{AccelsPlus, RelmAction, RelmActionGroup};
 use relm4::adw::prelude::*;
 use relm4::gtk::{gio, glib};
 use relm4::{Component, ComponentParts, ComponentSender, RelmWidgetExt, adw, gtk};
 
-use crate::battery::history::{History, Sample};
+use crate::battery::history::{self, History, Sample};
 use crate::battery::sysfs;
 use crate::battery::types::{Battery, Status};
 use crate::format;
 use crate::graph::Series;
+use crate::store;
 
 const POLL_SECS: u32 = 2;
 
-/// 30 minutes of samples at `POLL_SECS`, the window the graph will draw.
-const HISTORY_CAP: usize = 900;
+/// One graph sample per this many seconds, whatever the poll rate. A day at this
+/// cadence is ~2 880 points — more than the plot has pixels, and small enough
+/// that the history file stays around 100 KB.
+const RECORD_SECS: f64 = 30.0;
+
+/// Room for a day of `RECORD_SECS` samples plus the extra ones a busy day of
+/// state changes adds. Age, not this, is what actually bounds the history.
+const HISTORY_CAP: usize = 4096;
+
+/// The live readings kept for smoothing only — `SMOOTH_SECS` at `POLL_SECS`,
+/// with room to spare. Never persisted.
+const POWER_CAP: usize = 128;
 
 /// Power is averaged over this trailing window before it drives an estimate. A
 /// single reading swings with whatever the CPU is doing that instant, which made
@@ -38,6 +49,7 @@ relm4::new_stateless_action!(QuitAction, AppActionGroup, "quit");
 pub struct AppModel {
     battery: Option<Battery>,
     history: History,
+    power_window: History,
     poll: Option<glib::SourceId>,
 }
 
@@ -48,17 +60,49 @@ pub enum AppMsg {
     ShowAbout,
 }
 
+/// Results from off-thread work. Disk I/O never happens in `update` (rule 3);
+/// only sysfs earns that exception.
+#[derive(Debug)]
+pub enum CommandMsg {
+    Loaded(Vec<Sample>),
+    Written(Result<(), String>),
+}
+
 impl AppModel {
-    fn sample(&mut self) {
+    fn sample(&mut self, sender: &ComponentSender<Self>) {
         self.battery = sysfs::read();
-        if let Some(battery) = &self.battery {
-            self.history.push(Sample {
-                at: SystemTime::now(),
-                percent: battery.percent,
-                power: battery.power,
-                status: battery.status,
-            });
+        let Some(battery) = &self.battery else {
+            return;
+        };
+        let sample = Sample {
+            at: history::now(),
+            percent: battery.percent,
+            power: battery.power,
+            status: battery.status,
+        };
+
+        self.power_window.push(sample);
+        if !self.should_record(&sample) {
+            return;
         }
+        self.history.push(sample);
+        self.history.prune_older_than(store::MAX_AGE_SECS);
+        sender.oneshot_command(async move {
+            CommandMsg::Written(
+                relm4::spawn_blocking(move || store::append(&sample))
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(|result| result.map_err(|error| error.to_string())),
+            )
+        });
+    }
+
+    /// A state change is recorded whenever it happens — it is what colours the
+    /// graph, and waiting for the cadence would misplace the transition.
+    fn should_record(&self, sample: &Sample) -> bool {
+        self.history.newest().is_none_or(|last| {
+            last.status != sample.status || history::elapsed_secs(last.at, sample.at) >= RECORD_SECS
+        })
     }
 
     fn start_poll(&mut self, sender: &ComponentSender<Self>) {
@@ -103,7 +147,7 @@ impl AppModel {
     /// The rate the estimates run on: the trailing average, falling back to the
     /// live reading until there is enough history to average.
     fn smoothed_power(&self) -> Option<f64> {
-        self.history
+        self.power_window
             .recent_power(SMOOTH_SECS)
             .or_else(|| self.battery.as_ref().and_then(|b| b.power))
     }
@@ -158,7 +202,7 @@ impl AppModel {
     /// then it would just repeat the number on the right of the same row.
     fn power_subtitle(&self) -> String {
         let (Some(average), Some(live)) = (
-            self.history.recent_power(SMOOTH_SECS),
+            self.power_window.recent_power(SMOOTH_SECS),
             self.battery.as_ref().and_then(|b| b.power),
         ) else {
             return String::new();
@@ -225,7 +269,7 @@ impl Component for AppModel {
     type Init = ();
     type Input = AppMsg;
     type Output = ();
-    type CommandOutput = ();
+    type CommandOutput = CommandMsg;
 
     view! {
         adw::ApplicationWindow {
@@ -422,9 +466,10 @@ impl Component for AppModel {
         let mut model = AppModel {
             battery: None,
             history: History::new(HISTORY_CAP),
+            power_window: History::new(POWER_CAP),
             poll: None,
         };
-        model.sample();
+        model.sample(&sender);
 
         let widgets = view_output!();
 
@@ -459,18 +504,44 @@ impl Component for AppModel {
 
         model.start_poll(&sender);
 
+        // Reading the history file is disk I/O, so it cannot happen inline here.
+        // The window paints with whatever this session has sampled and the older
+        // samples fold in underneath a moment later.
+        sender.oneshot_command(async {
+            CommandMsg::Loaded(relm4::spawn_blocking(store::load).await.unwrap_or_default())
+        });
+
         ComponentParts { model, widgets }
+    }
+
+    fn update_cmd(
+        &mut self,
+        msg: Self::CommandOutput,
+        _sender: ComponentSender<Self>,
+        _root: &Self::Root,
+    ) {
+        match msg {
+            CommandMsg::Loaded(samples) => {
+                tracing::debug!("loaded {} samples from the history file", samples.len());
+                self.history.absorb(samples);
+                self.history.prune_older_than(store::MAX_AGE_SECS);
+            }
+            CommandMsg::Written(Err(error)) => {
+                tracing::warn!("could not write the history file: {error}");
+            }
+            CommandMsg::Written(Ok(())) => {}
+        }
     }
 
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, root: &Self::Root) {
         match msg {
-            AppMsg::Tick => self.sample(),
+            AppMsg::Tick => self.sample(&sender),
 
             AppMsg::SuspendedChanged(suspended) => {
                 if suspended {
                     self.stop_poll();
                 } else {
-                    self.sample();
+                    self.sample(&sender);
                     self.start_poll(&sender);
                 }
             }

@@ -26,6 +26,28 @@ impl Status {
         }
     }
 
+    /// The stable string written to the history file. Never change these
+    /// without a format migration — old lines are parsed with them.
+    pub fn as_key(self) -> &'static str {
+        match self {
+            Status::Charging => "charging",
+            Status::Discharging => "discharging",
+            Status::Full => "full",
+            Status::NotCharging => "not-charging",
+            Status::Unknown => "unknown",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Self {
+        match key {
+            "charging" => Status::Charging,
+            "discharging" => Status::Discharging,
+            "full" => Status::Full,
+            "not-charging" => Status::NotCharging,
+            _ => Status::Unknown,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Status::Charging => "Charging",
