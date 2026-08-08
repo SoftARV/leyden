@@ -10,3 +10,4 @@ Categories=System;Monitor;GTK;
 Keywords=Battery;Power;Charge;Energy;Watt;Laptop;
 StartupNotify=true
 StartupWMClass=dev.miguelrincon.Leyden
+X-GNOME-UsesNotifications=true

@@ -83,6 +83,7 @@ impl Theme {
 pub struct Settings {
     pub poll_secs: u32,
     pub theme: Theme,
+    pub alerts: bool,
 }
 
 impl Default for Settings {
@@ -90,6 +91,9 @@ impl Default for Settings {
         Self {
             poll_secs: DEFAULT_POLL_SECS,
             theme: Theme::default(),
+            // Off by default: GNOME already warns about low battery, and a
+            // second banner saying the same thing is noise, not a feature.
+            alerts: false,
         }
     }
 }
@@ -114,6 +118,7 @@ impl Settings {
             theme: file
                 .string(GROUP, "theme")
                 .map_or_else(|_| Theme::default(), |key| Theme::from_key(&key)),
+            alerts: file.boolean(GROUP, "alerts").unwrap_or(false),
         }
     }
 
@@ -125,6 +130,7 @@ impl Settings {
         };
         file.set_integer(GROUP, "poll-secs", secs);
         file.set_string(GROUP, "theme", self.theme.as_key());
+        file.set_boolean(GROUP, "alerts", self.alerts);
 
         let path = path();
         if let Some(dir) = path.parent() {
