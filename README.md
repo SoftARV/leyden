@@ -1,7 +1,14 @@
-# Leyden
+<p align="center">
+  <img src="data/icons/hicolor/scalable/apps/dev.miguelrincon.Leyden.svg"
+       width="128" height="128" alt="">
+</p>
 
-A small, native GNOME app that watches your laptop battery: state, capacity,
-live power draw and intake, and how long a charge lasts.
+<h1 align="center">Leyden</h1>
+
+<p align="center">
+  A small, native GNOME app that watches your laptop battery: state, capacity,
+  live power draw and intake, and how long a charge lasts.
+</p>
 
 Named after the [Leyden jar](https://en.wikipedia.org/wiki/Leyden_jar) (1745),
 the first device that could store an electric charge.
@@ -10,8 +17,10 @@ Built with Rust, [relm4](https://relm4.org), GTK 4 and libadwaita — for one
 laptop, running GNOME.
 
 <p align="center">
-  <img src="docs/screenshots/overview.png" width="420"
-       alt="Leyden showing a battery at 32%, discharging with 1 h 12 min left, drawing 17.1 W">
+  <img src="docs/screenshots/overview.png" width="440"
+       alt="Leyden showing a battery at 70%, discharging with 4 h 31 min left: a
+            graph of the last 2 h 56 min with hour marks and a bridged gap, and a
+            9.6 W draw with a 10.7 W average">
 </p>
 
 ## Status
@@ -22,6 +31,12 @@ charging, accent while draining. History is kept in
 `~/.local/share/leyden/history.tsv`, so the graph is already populated when you
 open the window. Time estimates run on a smoothed power rate rather than a single
 noisy reading.
+
+**Recordings** — the button on the left of the header — lists the last five
+discharges and the last five charges, each with how long it took, what it cost,
+and its own graph. Gaps are bridged rather than left as holes, and say what they
+were: a suspend reads *"Asleep · 8 h · 11% used (1.4%/h)"*, a stretch with the app
+closed says so instead.
 
 Preferences (refresh interval, theme, time format, alerts, background) live in
 `~/.config/leyden/settings.ini`. With **Keep running in the background** on,
