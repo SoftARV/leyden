@@ -20,9 +20,8 @@ use crate::battery::sysfs;
 use crate::battery::types::{Battery, Status};
 use crate::format;
 use crate::graph::Series;
+use crate::settings::{MAX_POLL_SECS, MIN_POLL_SECS, Settings, Theme};
 use crate::store;
-
-const POLL_SECS: u32 = 2;
 
 /// One graph sample per this many seconds, whatever the poll rate. A day at this
 /// cadence is ~2 880 points — more than the plot has pixels, and small enough
@@ -46,10 +45,13 @@ const SMOOTH_SECS: f64 = 120.0;
 /// a suspend, or a window that was hidden with the timer off. There is one per
 /// ring because the threshold only means anything against that ring's own
 /// cadence: below it, every consecutive pair reads as a gap.
-const POLL_GAP_SECS: f64 = POLL_SECS as f64 * 7.0;
+/// The recorded ring's threshold is a constant because its cadence is; the
+/// poll ring's follows the configured interval, so it lives in `poll_gap_secs`.
 const RECORD_GAP_SECS: f64 = RECORD_SECS * 3.0;
 
 relm4::new_action_group!(AppActionGroup, "win");
+relm4::new_stateless_action!(PreferencesAction, AppActionGroup, "preferences");
+relm4::new_stateless_action!(ShortcutsAction, AppActionGroup, "shortcuts");
 relm4::new_stateless_action!(AboutAction, AppActionGroup, "about");
 relm4::new_stateless_action!(QuitAction, AppActionGroup, "quit");
 
@@ -58,6 +60,7 @@ pub struct AppModel {
     history: History,
     power_window: History,
     poll: Option<glib::SourceId>,
+    settings: Settings,
 }
 
 #[derive(Debug)]
@@ -65,6 +68,10 @@ pub enum AppMsg {
     Tick,
     SuspendedChanged(bool),
     ShowAbout,
+    ShowPreferences,
+    ShowShortcuts,
+    SetPollSecs(u32),
+    SetTheme(Theme),
 }
 
 /// Results from off-thread work. Disk I/O never happens in `update` (rule 3);
@@ -73,6 +80,7 @@ pub enum AppMsg {
 pub enum CommandMsg {
     Loaded(Vec<Sample>),
     Written(Result<(), String>),
+    Saved(Result<(), String>),
 }
 
 impl AppModel {
@@ -117,10 +125,68 @@ impl AppModel {
             return;
         }
         let input = sender.input_sender().clone();
-        self.poll = Some(glib::timeout_add_seconds_local(POLL_SECS, move || {
-            input.send(AppMsg::Tick).ok();
-            glib::ControlFlow::Continue
-        }));
+        self.poll = Some(glib::timeout_add_seconds_local(
+            self.settings.poll_secs,
+            move || {
+                input.send(AppMsg::Tick).ok();
+                glib::ControlFlow::Continue
+            },
+        ));
+    }
+
+    /// Two samples further apart than this were not consecutive polls. Derived
+    /// from the configured interval, never a bare number — a threshold below the
+    /// cadence makes every pair look like a gap.
+    fn poll_gap_secs(&self) -> f64 {
+        f64::from(self.settings.poll_secs) * 7.0
+    }
+
+    fn preferences_dialog(&self, sender: &ComponentSender<Self>) -> adw::PreferencesDialog {
+        let group = adw::PreferencesGroup::builder().title("General").build();
+
+        let poll =
+            adw::SpinRow::with_range(f64::from(MIN_POLL_SECS), f64::from(MAX_POLL_SECS), 1.0);
+        poll.set_title("Refresh interval");
+        poll.set_subtitle("Seconds between battery readings");
+        poll.set_value(f64::from(self.settings.poll_secs));
+        let poll_sender = sender.input_sender().clone();
+        poll.connect_value_notify(move |row| {
+            poll_sender
+                .send(AppMsg::SetPollSecs(row.value().round() as u32))
+                .ok();
+        });
+        group.add(&poll);
+
+        let theme = adw::ComboRow::builder()
+            .title("Appearance")
+            .model(&gtk::StringList::new(&["Follow system", "Light", "Dark"]))
+            .selected(self.settings.theme.index())
+            .build();
+        let theme_sender = sender.input_sender().clone();
+        theme.connect_selected_notify(move |row| {
+            theme_sender
+                .send(AppMsg::SetTheme(Theme::from_index(row.selected())))
+                .ok();
+        });
+        group.add(&theme);
+
+        let page = adw::PreferencesPage::new();
+        page.add(&group);
+        let dialog = adw::PreferencesDialog::new();
+        dialog.add(&page);
+        dialog
+    }
+
+    fn save_settings(&self, sender: &ComponentSender<Self>) {
+        let settings = self.settings.clone();
+        sender.oneshot_command(async move {
+            CommandMsg::Saved(
+                relm4::spawn_blocking(move || settings.save())
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(|result| result),
+            )
+        });
     }
 
     fn stop_poll(&mut self) {
@@ -155,7 +221,7 @@ impl AppModel {
     /// live reading until there is enough history to average.
     fn smoothed_power(&self) -> Option<f64> {
         self.power_window
-            .recent_power(SMOOTH_SECS, POLL_GAP_SECS)
+            .recent_power(SMOOTH_SECS, self.poll_gap_secs())
             .or_else(|| self.battery.as_ref().and_then(|b| b.power))
     }
 
@@ -209,7 +275,8 @@ impl AppModel {
     /// then it would just repeat the number on the right of the same row.
     fn power_subtitle(&self) -> String {
         let (Some(average), Some(live)) = (
-            self.power_window.recent_power(SMOOTH_SECS, POLL_GAP_SECS),
+            self.power_window
+                .recent_power(SMOOTH_SECS, self.poll_gap_secs()),
             self.battery.as_ref().and_then(|b| b.power),
         ) else {
             return String::new();
@@ -273,7 +340,7 @@ impl AppModel {
 
 #[relm4::component(pub)]
 impl Component for AppModel {
-    type Init = ();
+    type Init = Settings;
     type Input = AppMsg;
     type Output = ();
     type CommandOutput = CommandMsg;
@@ -466,7 +533,7 @@ impl Component for AppModel {
     }
 
     fn init(
-        _init: Self::Init,
+        settings: Self::Init,
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
@@ -475,16 +542,27 @@ impl Component for AppModel {
             history: History::new(HISTORY_CAP),
             power_window: History::new(POWER_CAP),
             poll: None,
+            settings,
         };
         model.sample(&sender);
 
         let widgets = view_output!();
 
         let menu = gio::Menu::new();
+        menu.append(Some("Preferences"), Some("win.preferences"));
+        menu.append(Some("Keyboard Shortcuts"), Some("win.shortcuts"));
         menu.append(Some("About Leyden"), Some("win.about"));
         menu.append(Some("Quit"), Some("win.quit"));
         widgets.menu_button.set_menu_model(Some(&menu));
 
+        let preferences_sender = sender.input_sender().clone();
+        let preferences: RelmAction<PreferencesAction> = RelmAction::new_stateless(move |_| {
+            preferences_sender.send(AppMsg::ShowPreferences).ok();
+        });
+        let shortcuts_sender = sender.input_sender().clone();
+        let shortcuts: RelmAction<ShortcutsAction> = RelmAction::new_stateless(move |_| {
+            shortcuts_sender.send(AppMsg::ShowShortcuts).ok();
+        });
         let about_sender = sender.input_sender().clone();
         let about: RelmAction<AboutAction> = RelmAction::new_stateless(move |_| {
             about_sender.send(AppMsg::ShowAbout).ok();
@@ -493,11 +571,15 @@ impl Component for AppModel {
             relm4::main_application().quit();
         });
         let mut actions = RelmActionGroup::<AppActionGroup>::new();
+        actions.add_action(preferences);
+        actions.add_action(shortcuts);
         actions.add_action(about);
         actions.add_action(quit);
         actions.register_for_widget(&root);
 
         let application = relm4::main_application();
+        application.set_accelerators_for_action::<PreferencesAction>(&["<Control>comma"]);
+        application.set_accelerators_for_action::<ShortcutsAction>(&["<Control>question"]);
         application.set_accelerators_for_action::<QuitAction>(&["<Control>q"]);
 
         // A hidden window has nothing to draw, so the timer comes off entirely
@@ -537,6 +619,10 @@ impl Component for AppModel {
                 tracing::warn!("could not write the history file: {error}");
             }
             CommandMsg::Written(Ok(())) => {}
+            CommandMsg::Saved(Err(error)) => {
+                tracing::warn!("could not write the settings file: {error}");
+            }
+            CommandMsg::Saved(Ok(())) => {}
         }
     }
 
@@ -553,6 +639,30 @@ impl Component for AppModel {
                 }
             }
 
+            AppMsg::SetPollSecs(secs) => {
+                let secs = secs.clamp(MIN_POLL_SECS, MAX_POLL_SECS);
+                if secs != self.settings.poll_secs {
+                    self.settings.poll_secs = secs;
+                    // The interval lives in the timer, so it only takes effect on
+                    // a fresh one.
+                    self.stop_poll();
+                    self.start_poll(&sender);
+                    self.save_settings(&sender);
+                }
+            }
+
+            AppMsg::SetTheme(theme) => {
+                if theme != self.settings.theme {
+                    self.settings.theme = theme;
+                    self.settings.apply_theme();
+                    self.save_settings(&sender);
+                }
+            }
+
+            AppMsg::ShowPreferences => self.preferences_dialog(&sender).present(Some(root)),
+
+            AppMsg::ShowShortcuts => shortcuts_dialog().present(Some(root)),
+
             AppMsg::ShowAbout => {
                 let about = adw::AboutDialog::builder()
                     .application_name("Leyden")
@@ -566,4 +676,19 @@ impl Component for AppModel {
             }
         }
     }
+}
+
+/// The accelerators registered in `init`, in the order they are worth learning.
+fn shortcuts_dialog() -> adw::ShortcutsDialog {
+    let section = adw::ShortcutsSection::new(Some("General"));
+    section.add(adw::ShortcutsItem::new("Preferences", "<Control>comma"));
+    section.add(adw::ShortcutsItem::new(
+        "Keyboard Shortcuts",
+        "<Control>question",
+    ));
+    section.add(adw::ShortcutsItem::new("Quit", "<Control>q"));
+
+    let dialog = adw::ShortcutsDialog::new();
+    dialog.add(section);
+    dialog
 }
