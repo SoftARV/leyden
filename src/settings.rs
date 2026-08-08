@@ -156,6 +156,7 @@ pub struct Settings {
     pub theme: Theme,
     pub alerts: bool,
     pub clock: Clock,
+    pub background: bool,
 }
 
 impl Default for Settings {
@@ -167,6 +168,9 @@ impl Default for Settings {
             // second banner saying the same thing is noise, not a feature.
             alerts: false,
             clock: Clock::default(),
+            // Off by default: closing a window should close the app unless the
+            // user has decided otherwise.
+            background: false,
         }
     }
 }
@@ -195,6 +199,7 @@ impl Settings {
             clock: file
                 .string(GROUP, "clock")
                 .map_or_else(|_| Clock::default(), |key| Clock::from_key(&key)),
+            background: file.boolean(GROUP, "background").unwrap_or(false),
         }
     }
 
@@ -208,6 +213,7 @@ impl Settings {
         file.set_string(GROUP, "theme", self.theme.as_key());
         file.set_boolean(GROUP, "alerts", self.alerts);
         file.set_string(GROUP, "clock", self.clock.as_key());
+        file.set_boolean(GROUP, "background", self.background);
 
         let path = path();
         if let Some(dir) = path.parent() {

@@ -35,6 +35,10 @@ const HYSTERESIS: f64 = 3.0;
 /// stacking another one beside it.
 const ID: &str = "battery";
 
+/// Separate id: a low-battery warning must not replace the notice explaining
+/// that the app is still running, nor the other way round.
+const BACKGROUND_ID: &str = "background";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Alert {
     Low,
@@ -140,6 +144,31 @@ pub fn send(alert: Alert, percent: f64) {
     notification.set_icon(&gio::ThemedIcon::new(alert.icon_name()));
     notification.set_priority(alert.priority());
     relm4::main_application().send_notification(Some(ID), &notification);
+}
+
+/// Tell the user the app is still recording after its window closed, and give
+/// them the two things they would otherwise have no way to reach.
+///
+/// This is the only affordance for a windowless Leyden. GNOME's *Background
+/// Apps* menu is driven by `org.freedesktop.background.Monitor`, which this
+/// portal does not expose for an unsandboxed app, so without this the app would
+/// be running with nothing to show for it and no way to stop it short of
+/// relaunching.
+pub fn background_running() {
+    let notification = gio::Notification::new("Leyden is still recording");
+    notification.set_body(Some(
+        "The window is closed but the battery is still being measured.",
+    ));
+    notification.set_icon(&gio::ThemedIcon::new(crate::APP_ID));
+    notification.set_priority(gio::NotificationPriority::Low);
+    notification.add_button("Show", "app.show");
+    notification.add_button("Quit", "app.quit");
+    relm4::main_application().send_notification(Some(BACKGROUND_ID), &notification);
+}
+
+/// Take the notice down — the window is back, so it no longer applies.
+pub fn background_dismissed() {
+    relm4::main_application().withdraw_notification(BACKGROUND_ID);
 }
 
 #[cfg(test)]
