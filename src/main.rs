@@ -5,6 +5,7 @@ mod app;
 mod battery;
 mod format;
 mod graph;
+mod settings;
 mod store;
 
 use relm4::RelmApp;
@@ -25,7 +26,12 @@ fn main() {
     // feature is on — `adw::init()`, so there is deliberately no adw init here.
     let app = RelmApp::new(APP_ID);
     setup_icon();
-    app.run::<app::AppModel>(());
+
+    // Load and apply before the window is shown, so there is no flash of the
+    // wrong colour scheme. The model owns the settings from here.
+    let settings = settings::Settings::load();
+    settings.apply_theme();
+    app.run::<app::AppModel>(settings);
 }
 
 /// On Wayland a client cannot set its own toplevel icon — GNOME Shell takes it
