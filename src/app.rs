@@ -42,6 +42,13 @@ const POWER_CAP: usize = 128;
 /// "time left" jump by tens of minutes between polls.
 const SMOOTH_SECS: f64 = 120.0;
 
+/// How far apart two samples must be before they stop counting as neighbours —
+/// a suspend, or a window that was hidden with the timer off. There is one per
+/// ring because the threshold only means anything against that ring's own
+/// cadence: below it, every consecutive pair reads as a gap.
+const POLL_GAP_SECS: f64 = POLL_SECS as f64 * 7.0;
+const RECORD_GAP_SECS: f64 = RECORD_SECS * 3.0;
+
 relm4::new_action_group!(AppActionGroup, "win");
 relm4::new_stateless_action!(AboutAction, AppActionGroup, "about");
 relm4::new_stateless_action!(QuitAction, AppActionGroup, "quit");
@@ -148,7 +155,7 @@ impl AppModel {
     /// live reading until there is enough history to average.
     fn smoothed_power(&self) -> Option<f64> {
         self.power_window
-            .recent_power(SMOOTH_SECS)
+            .recent_power(SMOOTH_SECS, POLL_GAP_SECS)
             .or_else(|| self.battery.as_ref().and_then(|b| b.power))
     }
 
@@ -202,7 +209,7 @@ impl AppModel {
     /// then it would just repeat the number on the right of the same row.
     fn power_subtitle(&self) -> String {
         let (Some(average), Some(live)) = (
-            self.power_window.recent_power(SMOOTH_SECS),
+            self.power_window.recent_power(SMOOTH_SECS, POLL_GAP_SECS),
             self.battery.as_ref().and_then(|b| b.power),
         ) else {
             return String::new();
@@ -365,7 +372,7 @@ impl Component for AppModel {
                                         set_height_request: 160,
                                         add_css_class: "card",
                                         #[watch]
-                                        set_draw_func: Series::from_history(&model.history)
+                                        set_draw_func: Series::from_history(&model.history, RECORD_GAP_SECS)
                                             .draw_func(),
                                     },
                                 },

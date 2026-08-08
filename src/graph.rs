@@ -10,7 +10,7 @@ use relm4::gtk;
 use relm4::gtk::cairo;
 use relm4::gtk::gdk;
 
-use crate::battery::history::{GAP_SECS, History, elapsed_secs};
+use crate::battery::history::{History, elapsed_secs};
 use crate::battery::types::Status;
 
 const PAD: f64 = 14.0;
@@ -64,7 +64,11 @@ pub struct Series {
 }
 
 impl Series {
-    pub fn from_history(history: &History) -> Self {
+    /// `gap_secs` is how far apart two samples must be before the line breaks
+    /// rather than inventing a slope across them. It belongs to the caller
+    /// because it is only meaningful against the ring's own recording cadence:
+    /// a threshold below that cadence makes every pair look like a gap.
+    pub fn from_history(history: &History, gap_secs: f64) -> Self {
         let mut series = Series {
             segments: Vec::new(),
             span: history.span_secs(),
@@ -79,7 +83,7 @@ impl Series {
             let Some(start) = start else { continue };
             let at = elapsed_secs(start, sample.at);
             let trend = Trend::of(sample.status);
-            let gap = previous.is_some_and(|(last, ..)| at - last > GAP_SECS);
+            let gap = previous.is_some_and(|(last, ..)| at - last > gap_secs);
             let changed = previous.is_some_and(|(.., last)| last != trend);
 
             if previous.is_none() || gap || changed {
@@ -248,34 +252,65 @@ mod tests {
     }
 
     #[test]
+    fn the_recorded_cadence_still_draws_one_line() {
+        // History is recorded every RECORD_SECS (30s). If the gap threshold is
+        // smaller than that, every consecutive pair reads as a gap and the graph
+        // degenerates into isolated single points that draw nothing at all.
+        let series = Series::from_history(
+            &history(&[
+                (0, 80.0, Status::Discharging),
+                (30, 79.0, Status::Discharging),
+                (60, 78.0, Status::Discharging),
+                (90, 77.0, Status::Discharging),
+            ]),
+            90.0,
+        );
+        assert_eq!(
+            series.segments.len(),
+            1,
+            "a steady 30s cadence must be one segment"
+        );
+        assert_eq!(series.runs().len(), 1, "and one continuous filled run");
+    }
+
+    #[test]
     fn a_steady_discharge_is_one_segment() {
-        let series = Series::from_history(&history(&[
-            (0, 80.0, Status::Discharging),
-            (2, 79.0, Status::Discharging),
-            (4, 78.0, Status::Discharging),
-        ]));
+        let series = Series::from_history(
+            &history(&[
+                (0, 80.0, Status::Discharging),
+                (2, 79.0, Status::Discharging),
+                (4, 78.0, Status::Discharging),
+            ]),
+            15.0,
+        );
         assert_eq!(series.segments.len(), 1);
         assert_eq!(series.points(), 3);
     }
 
     #[test]
     fn a_suspend_breaks_the_line() {
-        let series = Series::from_history(&history(&[
-            (0, 80.0, Status::Discharging),
-            (2, 79.0, Status::Discharging),
-            (7200, 40.0, Status::Discharging),
-        ]));
+        let series = Series::from_history(
+            &history(&[
+                (0, 80.0, Status::Discharging),
+                (2, 79.0, Status::Discharging),
+                (7200, 40.0, Status::Discharging),
+            ]),
+            15.0,
+        );
         assert_eq!(series.segments.len(), 2);
         assert_eq!(series.segments[1].points.len(), 1);
     }
 
     #[test]
     fn plugging_in_changes_colour_without_breaking_the_line() {
-        let series = Series::from_history(&history(&[
-            (0, 80.0, Status::Discharging),
-            (2, 79.0, Status::Discharging),
-            (4, 79.0, Status::Charging),
-        ]));
+        let series = Series::from_history(
+            &history(&[
+                (0, 80.0, Status::Discharging),
+                (2, 79.0, Status::Discharging),
+                (4, 79.0, Status::Charging),
+            ]),
+            15.0,
+        );
         assert_eq!(series.segments.len(), 2);
         // The charging segment starts at the last discharging point, so the two
         // meet instead of leaving a hole.
@@ -285,20 +320,26 @@ mod tests {
 
     #[test]
     fn only_a_gap_splits_the_filled_area() {
-        let plugged_in = Series::from_history(&history(&[
-            (0, 80.0, Status::Discharging),
-            (2, 79.0, Status::Discharging),
-            (4, 79.0, Status::Charging),
-        ]));
+        let plugged_in = Series::from_history(
+            &history(&[
+                (0, 80.0, Status::Discharging),
+                (2, 79.0, Status::Discharging),
+                (4, 79.0, Status::Charging),
+            ]),
+            15.0,
+        );
         assert_eq!(plugged_in.segments.len(), 2);
         assert_eq!(plugged_in.runs().len(), 1);
         assert_eq!(plugged_in.runs()[0].len(), 3);
 
-        let slept = Series::from_history(&history(&[
-            (0, 80.0, Status::Discharging),
-            (2, 79.0, Status::Discharging),
-            (7200, 40.0, Status::Discharging),
-        ]));
+        let slept = Series::from_history(
+            &history(&[
+                (0, 80.0, Status::Discharging),
+                (2, 79.0, Status::Discharging),
+                (7200, 40.0, Status::Discharging),
+            ]),
+            15.0,
+        );
         assert_eq!(slept.runs().len(), 2);
     }
 }
