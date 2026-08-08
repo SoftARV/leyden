@@ -29,6 +29,11 @@ use crate::battery::types::Status;
 /// rewritten without them.
 pub const MAX_AGE_SECS: f64 = 24.0 * 60.0 * 60.0;
 
+/// A day at the recording cadence is roughly 100 KB. Past this the file is
+/// carrying more than a day, so it is compacted on the spot rather than waiting
+/// for the next load — a session left running for a week never reloads at all.
+const MAX_BYTES: u64 = 256 * 1024;
+
 fn path() -> PathBuf {
     glib::user_data_dir().join("leyden").join("history.tsv")
 }
@@ -36,11 +41,21 @@ fn path() -> PathBuf {
 /// Every sample from the last `MAX_AGE_SECS`, oldest first. A missing or
 /// unreadable file is not an error — it is a first run.
 pub fn load() -> Vec<Sample> {
-    let path = path();
-    let Ok(file) = File::open(&path) else {
-        return Vec::new();
-    };
+    let (samples, total) = within_horizon();
+    if samples.len() < total
+        && let Err(error) = rewrite(&samples)
+    {
+        tracing::warn!("could not compact the history file: {error}");
+    }
+    samples
+}
 
+/// Every sample still inside the horizon, plus how many parsed lines the file
+/// held — the difference is what compaction would remove.
+fn within_horizon() -> (Vec<Sample>, usize) {
+    let Ok(file) = File::open(path()) else {
+        return (Vec::new(), 0);
+    };
     let cutoff = SystemTime::now().checked_sub(Duration::from_secs_f64(MAX_AGE_SECS));
     let mut total = 0usize;
     let mut samples: Vec<Sample> = BufReader::new(file)
@@ -55,14 +70,8 @@ pub fn load() -> Vec<Sample> {
             }
         })
         .collect();
-
     samples.sort_by_key(|sample| sample.at);
-    if samples.len() < total
-        && let Err(error) = rewrite(&samples)
-    {
-        tracing::warn!("could not compact the history file: {error}");
-    }
-    samples
+    (samples, total)
 }
 
 /// Add one sample to the end of the file, creating it if this is a first run.
@@ -78,7 +87,15 @@ pub fn append(sample: &Sample) -> std::io::Result<()> {
         .create(true)
         .append(true)
         .open(&path)?
-        .write_all(line.as_bytes())
+        .write_all(line.as_bytes())?;
+
+    // Compaction otherwise only happens on load, so a long-running session would
+    // append past the horizon indefinitely.
+    if fs::metadata(&path).is_ok_and(|file| file.len() > MAX_BYTES) {
+        let (samples, _) = within_horizon();
+        rewrite(&samples)?;
+    }
+    Ok(())
 }
 
 /// Replace the file with exactly `samples`. Written to a sibling temporary and

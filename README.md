@@ -23,8 +23,10 @@ charging, accent while draining. History is kept in
 open the window. Time estimates run on a smoothed power rate rather than a single
 noisy reading.
 
-Preferences (refresh interval, theme, alerts) live in
-`~/.config/leyden/settings.ini`. Notifications at 20%, 10% and full charge need
+Preferences (refresh interval, theme, time format, alerts, background) live in
+`~/.config/leyden/settings.ini`. With **Keep running in the background** on,
+closing the window keeps recording, so a long measurement is not interrupted;
+relaunching brings the window back. Notifications at 20%, 10% and full charge need
 the app installed — GNOME ignores notifications from an app it cannot resolve to
 an installed `.desktop`.
 

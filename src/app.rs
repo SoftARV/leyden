@@ -24,10 +24,16 @@ use crate::notify::{self, Alerts};
 use crate::settings::{Clock, MAX_POLL_SECS, MIN_POLL_SECS, Settings, Theme};
 use crate::store;
 
+/// While nothing is on screen the app records but does not display, so it polls
+/// at exactly the recording cadence: a complete history for a fifteenth of the
+/// wakeups. This is the letter of hard rule 4 changing while its spirit — never
+/// be a cause of the drain you measure — stays.
+const HIDDEN_POLL_SECS: u32 = 30;
+
 /// One graph sample per this many seconds, whatever the poll rate. A day at this
 /// cadence is ~2 880 points — more than the plot has pixels, and small enough
 /// that the history file stays around 100 KB.
-const RECORD_SECS: f64 = 30.0;
+const RECORD_SECS: f64 = HIDDEN_POLL_SECS as f64;
 
 /// Room for a day of `RECORD_SECS` samples plus the extra ones a busy day of
 /// state changes adds. Age, not this, is what actually bounds the history.
@@ -50,6 +56,13 @@ const SMOOTH_SECS: f64 = 120.0;
 /// poll ring's follows the configured interval, so it lives in `poll_gap_secs`.
 const RECORD_GAP_SECS: f64 = RECORD_SECS * 3.0;
 
+// A second, application-level group. The notification that explains a
+// windowless Leyden has to act on something reachable without a window, and
+// `win.*` actions are not that.
+relm4::new_action_group!(AppLevelGroup, "app");
+relm4::new_stateless_action!(ShowAction, AppLevelGroup, "show");
+relm4::new_stateless_action!(QuitAppAction, AppLevelGroup, "quit");
+
 relm4::new_action_group!(AppActionGroup, "win");
 relm4::new_stateless_action!(PreferencesAction, AppActionGroup, "preferences");
 relm4::new_stateless_action!(ShortcutsAction, AppActionGroup, "shortcuts");
@@ -61,6 +74,9 @@ pub struct AppModel {
     history: History,
     power_window: History,
     poll: Option<glib::SourceId>,
+    /// Nothing of the window is on screen: minimised, occluded, on another
+    /// workspace, or closed while running in the background.
+    hidden: bool,
     settings: Settings,
     alerts: Alerts,
     /// Shared with the graph's draw and hover callbacks — see `graph::Plot`.
@@ -70,7 +86,12 @@ pub struct AppModel {
 #[derive(Debug)]
 pub enum AppMsg {
     Tick,
-    SuspendedChanged(bool),
+    /// The window's visibility or occlusion changed; the reducer reads the real
+    /// state off the root rather than trusting a single signal.
+    PresenceChanged,
+    /// The user asked to close the window. Whether that quits depends on the
+    /// background preference.
+    CloseRequested,
     ShowAbout,
     ShowPreferences,
     ShowShortcuts,
@@ -78,6 +99,7 @@ pub enum AppMsg {
     SetTheme(Theme),
     SetAlerts(bool),
     SetClock(Clock),
+    SetBackground(bool),
 }
 
 /// Results from off-thread work. Disk I/O never happens in `update` (rule 3);
@@ -140,7 +162,7 @@ impl AppModel {
         }
         let input = sender.input_sender().clone();
         self.poll = Some(glib::timeout_add_seconds_local(
-            self.settings.poll_secs,
+            self.poll_interval(),
             move || {
                 input.send(AppMsg::Tick).ok();
                 glib::ControlFlow::Continue
@@ -148,11 +170,28 @@ impl AppModel {
         ));
     }
 
+    /// The live rate while the window is on screen, the recording rate when it
+    /// is not.
+    fn poll_interval(&self) -> u32 {
+        if self.hidden {
+            HIDDEN_POLL_SECS
+        } else {
+            self.settings.poll_secs
+        }
+    }
+
     /// Two samples further apart than this were not consecutive polls. Derived
-    /// from the configured interval, never a bare number — a threshold below the
-    /// cadence makes every pair look like a gap.
+    /// from whichever interval is in force, never a bare number — a threshold
+    /// below the cadence makes every pair look like a gap.
     fn poll_gap_secs(&self) -> f64 {
-        f64::from(self.settings.poll_secs) * 7.0
+        f64::from(self.poll_interval()) * 7.0
+    }
+
+    /// The interval is baked into the `glib::timeout` when it is created, so a
+    /// change only takes effect on a fresh one.
+    fn restart_poll(&mut self, sender: &ComponentSender<Self>) {
+        self.stop_poll();
+        self.start_poll(sender);
     }
 
     fn preferences_dialog(&self, sender: &ComponentSender<Self>) -> adw::PreferencesDialog {
@@ -200,6 +239,21 @@ impl AppModel {
                 .ok();
         });
         group.add(&clock);
+
+        let background = adw::SwitchRow::builder()
+            .title("Keep running in the background")
+            .subtitle(
+                "Closing the window keeps recording, so a long measurement is not interrupted",
+            )
+            .active(self.settings.background)
+            .build();
+        let background_sender = sender.input_sender().clone();
+        background.connect_active_notify(move |row| {
+            background_sender
+                .send(AppMsg::SetBackground(row.is_active()))
+                .ok();
+        });
+        group.add(&background);
 
         let alerts = adw::SwitchRow::builder()
             .title("Battery alerts")
@@ -600,6 +654,10 @@ impl Component for AppModel {
             history: History::new(HISTORY_CAP),
             power_window: History::new(POWER_CAP),
             poll: None,
+            // Read, not assumed: the window is not on screen yet, and taking
+            // this for granted meant a never-shown window polled at the live
+            // rate forever.
+            hidden: !root.is_visible(),
             settings,
             alerts: Alerts::default(),
             plot: Plot::default(),
@@ -639,18 +697,41 @@ impl Component for AppModel {
         actions.add_action(quit);
         actions.register_for_widget(&root);
 
+        let window = root.clone();
+        let show: RelmAction<ShowAction> = RelmAction::new_stateless(move |_| {
+            window.present();
+        });
+        let quit_app: RelmAction<QuitAppAction> = RelmAction::new_stateless(move |_| {
+            relm4::main_application().quit();
+        });
+        let mut app_actions = RelmActionGroup::<AppLevelGroup>::new();
+        app_actions.add_action(show);
+        app_actions.add_action(quit_app);
+        app_actions.register_for_main_application();
+
         let application = relm4::main_application();
         application.set_accelerators_for_action::<PreferencesAction>(&["<Control>comma"]);
         application.set_accelerators_for_action::<ShortcutsAction>(&["<Control>question"]);
         application.set_accelerators_for_action::<QuitAction>(&["<Control>q"]);
 
-        // A hidden window has nothing to draw, so the timer comes off entirely
-        // rather than waking the CPU on a machine that is running on battery.
-        let suspended = sender.input_sender().clone();
-        root.connect_suspended_notify(move |window| {
-            suspended
-                .send(AppMsg::SuspendedChanged(window.is_suspended()))
-                .ok();
+        // Occlusion and visibility are separate signals and either can leave
+        // nothing on screen, so both feed one message and the reducer reads the
+        // real state back off the window.
+        let occluded = sender.input_sender().clone();
+        root.connect_suspended_notify(move |_| {
+            occluded.send(AppMsg::PresenceChanged).ok();
+        });
+        let shown = sender.input_sender().clone();
+        root.connect_visible_notify(move |_| {
+            shown.send(AppMsg::PresenceChanged).ok();
+        });
+
+        // Always intercepted: whether closing quits or merely hides is the
+        // reducer's decision, and it needs the current preference.
+        let closing = sender.input_sender().clone();
+        root.connect_close_request(move |_| {
+            closing.send(AppMsg::CloseRequested).ok();
+            glib::Propagation::Stop
         });
 
         model.start_poll(&sender);
@@ -692,12 +773,33 @@ impl Component for AppModel {
         match msg {
             AppMsg::Tick => self.sample(&sender),
 
-            AppMsg::SuspendedChanged(suspended) => {
-                if suspended {
-                    self.stop_poll();
+            AppMsg::PresenceChanged => {
+                let hidden = !root.is_visible() || root.is_suspended();
+                if hidden != self.hidden {
+                    self.hidden = hidden;
+                    // Coming back, whatever is on screen is as stale as the
+                    // absence was long.
+                    if !hidden {
+                        notify::background_dismissed();
+                        self.sample(&sender);
+                    }
+                    self.restart_poll(&sender);
+                }
+            }
+
+            AppMsg::CloseRequested => {
+                if self.settings.background {
+                    root.set_visible(false);
+                    notify::background_running();
                 } else {
-                    self.sample(&sender);
-                    self.start_poll(&sender);
+                    relm4::main_application().quit();
+                }
+            }
+
+            AppMsg::SetBackground(enabled) => {
+                if enabled != self.settings.background {
+                    self.settings.background = enabled;
+                    self.save_settings(&sender);
                 }
             }
 
@@ -705,10 +807,7 @@ impl Component for AppModel {
                 let secs = secs.clamp(MIN_POLL_SECS, MAX_POLL_SECS);
                 if secs != self.settings.poll_secs {
                     self.settings.poll_secs = secs;
-                    // The interval lives in the timer, so it only takes effect on
-                    // a fresh one.
-                    self.stop_poll();
-                    self.start_poll(&sender);
+                    self.restart_poll(&sender);
                     self.save_settings(&sender);
                 }
             }
