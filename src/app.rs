@@ -20,6 +20,7 @@ use crate::battery::sysfs;
 use crate::battery::types::{Battery, Status};
 use crate::format;
 use crate::graph::Series;
+use crate::notify::{self, Alerts};
 use crate::settings::{MAX_POLL_SECS, MIN_POLL_SECS, Settings, Theme};
 use crate::store;
 
@@ -61,6 +62,7 @@ pub struct AppModel {
     power_window: History,
     poll: Option<glib::SourceId>,
     settings: Settings,
+    alerts: Alerts,
 }
 
 #[derive(Debug)]
@@ -72,6 +74,7 @@ pub enum AppMsg {
     ShowShortcuts,
     SetPollSecs(u32),
     SetTheme(Theme),
+    SetAlerts(bool),
 }
 
 /// Results from off-thread work. Disk I/O never happens in `update` (rule 3);
@@ -95,6 +98,14 @@ impl AppModel {
             power: battery.power,
             status: battery.status,
         };
+
+        // Always advanced, even with alerts switched off, so turning them on
+        // does not immediately fire for a threshold crossed long ago.
+        if let Some(alert) = self.alerts.advance(battery.percent, battery.status)
+            && self.settings.alerts
+        {
+            notify::send(alert, battery.percent);
+        }
 
         self.power_window.push(sample);
         if !self.should_record(&sample) {
@@ -169,6 +180,17 @@ impl AppModel {
                 .ok();
         });
         group.add(&theme);
+
+        let alerts = adw::SwitchRow::builder()
+            .title("Battery alerts")
+            .subtitle("Notify at 20%, at 10% and when charged. GNOME already warns about low battery, so this is off by default")
+            .active(self.settings.alerts)
+            .build();
+        let alerts_sender = sender.input_sender().clone();
+        alerts.connect_active_notify(move |row| {
+            alerts_sender.send(AppMsg::SetAlerts(row.is_active())).ok();
+        });
+        group.add(&alerts);
 
         let page = adw::PreferencesPage::new();
         page.add(&group);
@@ -543,6 +565,7 @@ impl Component for AppModel {
             power_window: History::new(POWER_CAP),
             poll: None,
             settings,
+            alerts: Alerts::default(),
         };
         model.sample(&sender);
 
@@ -647,6 +670,13 @@ impl Component for AppModel {
                     // a fresh one.
                     self.stop_poll();
                     self.start_poll(&sender);
+                    self.save_settings(&sender);
+                }
+            }
+
+            AppMsg::SetAlerts(enabled) => {
+                if enabled != self.settings.alerts {
+                    self.settings.alerts = enabled;
                     self.save_settings(&sender);
                 }
             }

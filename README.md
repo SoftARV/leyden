@@ -16,11 +16,17 @@ laptop, running GNOME.
 
 ## Status
 
-Early. The current build shows live battery state, charge, power, voltage,
-health and cycle count, polled from `/sys/class/power_supply` every two seconds,
-plus a graph of the last 24 hours of charge — green while charging, accent while
-draining. History is kept in `~/.local/share/leyden/history.tsv`, so the graph is
-already populated when you open the window.
+Live battery state, charge, power, voltage, health and cycle count, read from
+`/sys/class/power_supply`, plus a graph of the last 24 hours — green while
+charging, accent while draining. History is kept in
+`~/.local/share/leyden/history.tsv`, so the graph is already populated when you
+open the window. Time estimates run on a smoothed power rate rather than a single
+noisy reading.
+
+Preferences (refresh interval, theme, alerts) live in
+`~/.config/leyden/settings.ini`. Notifications at 20%, 10% and full charge need
+the app installed — GNOME ignores notifications from an app it cannot resolve to
+an installed `.desktop`.
 
 ## Install
 

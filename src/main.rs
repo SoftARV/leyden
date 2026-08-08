@@ -5,6 +5,7 @@ mod app;
 mod battery;
 mod format;
 mod graph;
+mod notify;
 mod settings;
 mod store;
 
