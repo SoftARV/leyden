@@ -19,7 +19,7 @@ use relm4::gtk::cairo;
 use relm4::gtk::gdk;
 use relm4::gtk::glib;
 
-use crate::battery::history::{History, elapsed_secs};
+use crate::battery::history::{Follows, History, elapsed_secs};
 use crate::battery::types::Status;
 use crate::format;
 
@@ -38,9 +38,13 @@ const MARK_HOURS: [i64; 6] = [1, 2, 3, 6, 12, 24];
 /// does not jump as the pointer enters and leaves the plot.
 pub const IDLE_READOUT: &str = " ";
 
-/// Dash pattern for a bridged gap — long enough to read as deliberate rather
-/// than as a rendering artefact.
-const GAP_DASH: [f64; 2] = [5.0, 5.0];
+/// Dash for a suspend: long enough to read as deliberate rather than as a
+/// rendering artefact.
+const ASLEEP_DASH: [f64; 2] = [5.0, 5.0];
+
+/// Dot for a stretch nothing observed — finer and fainter, so an explained gap
+/// looks more solid than an unexplained one.
+const UNKNOWN_DASH: [f64; 2] = [1.5, 3.5];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Trend {
@@ -130,11 +134,45 @@ struct Point {
     power: Option<f64>,
 }
 
-/// Why the record stops for a stretch. Sleep detection (#15) adds a variant
-/// here; the tooltip and the dash already branch on it.
+/// Why the record stops for a stretch. Each is drawn differently, so the reason
+/// is visible without hovering: what is known reads more solidly than what is
+/// merely bounded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GapKind {
-    NotRecorded,
+    /// The machine was suspended — the reading on the far side says so.
+    Asleep,
+    /// The app was not running. The charge still moved, but nothing here knows
+    /// whether the machine was awake, asleep, or both.
+    NotRunning,
+    /// Neither marker is present: an older file, or a poll that simply stalled.
+    Unexplained,
+}
+
+impl GapKind {
+    fn of(follows: Follows) -> Self {
+        match follows {
+            Follows::Sleep => GapKind::Asleep,
+            Follows::Launch => GapKind::NotRunning,
+            Follows::Poll => GapKind::Unexplained,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            GapKind::Asleep => "Asleep",
+            GapKind::NotRunning => "App closed",
+            GapKind::Unexplained => "Not recorded",
+        }
+    }
+
+    /// A suspend is explained, so it is drawn as a plain dash. The other two are
+    /// holes in the record and fade to a finer, fainter dot.
+    fn dash(self) -> (&'static [f64], f64) {
+        match self {
+            GapKind::Asleep => (&ASLEEP_DASH, 0.55),
+            _ => (&UNKNOWN_DASH, 0.30),
+        }
+    }
 }
 
 /// A stretch with no samples, bridged on the plot rather than left as a hole.
@@ -146,21 +184,21 @@ struct Gap {
 }
 
 impl Gap {
+    /// Duration and, when the charge actually moved, what it cost and how fast.
+    /// The rate is the interesting part: a stretch at 1.4%/h was a sleeping
+    /// laptop, one at 3%/h was a laptop awake and in use.
     fn describe(&self) -> String {
         let elapsed = Duration::from_secs_f64((self.to.at - self.from.at).max(0.0));
-        let drop = self.from.percent - self.to.percent;
-        let what = match self.kind {
-            GapKind::NotRecorded => "Not recorded",
-        };
-        if drop > 0.5 {
-            format!(
-                "{what} · {} · {}% used",
-                format::duration(elapsed),
-                drop.round() as i64
-            )
-        } else {
-            format!("{what} · {}", format::duration(elapsed))
+        let used = self.from.percent - self.to.percent;
+        let mut text = format!("{} · {}", self.kind.label(), format::duration(elapsed));
+        if used > 0.5 {
+            text.push_str(&format!(" · {}% used", used.round() as i64));
+            let hours = elapsed.as_secs_f64() / 3600.0;
+            if hours >= 0.5 {
+                text.push_str(&format!(" ({:.1}%/h)", used / hours));
+            }
         }
+        text
     }
 }
 
@@ -224,7 +262,7 @@ impl Series {
                 series.gaps.push(Gap {
                     from: last,
                     to: point,
-                    kind: GapKind::NotRecorded,
+                    kind: GapKind::of(sample.follows),
                 });
             }
 
@@ -435,16 +473,15 @@ impl Series {
         // Bridge each gap with a dashed grey line and no fill: the charge did
         // change across it, but nothing here was measured, and a solid line
         // would claim otherwise.
-        if !self.gaps.is_empty() {
-            cr.set_dash(&GAP_DASH, 0.0);
-            palette.idle.apply(cr);
-            for gap in &self.gaps {
-                cr.move_to(x(gap.from.at), y(gap.from.percent));
-                cr.line_to(x(gap.to.at), y(gap.to.percent));
-            }
+        for gap in &self.gaps {
+            let (dash, alpha) = gap.kind.dash();
+            cr.set_dash(dash, 0.0);
+            palette.idle.with_alpha(alpha).apply(cr);
+            cr.move_to(x(gap.from.at), y(gap.from.percent));
+            cr.line_to(x(gap.to.at), y(gap.to.percent));
             cr.stroke().ok();
-            cr.set_dash(&[], 0.0);
         }
+        cr.set_dash(&[], 0.0);
 
         if let Some(segment) = self.segments.last()
             && let Some(last) = segment.points.last()
@@ -631,6 +668,81 @@ mod tests {
         );
     }
 
+    /// Same as `history`, but the last sample is marked as the first reading
+    /// after a wake.
+    fn history_after_sleep(entries: &[(u64, f64, Status)]) -> History {
+        let mut built = History::new(100);
+        let last = entries.len().saturating_sub(1);
+        for (index, (secs, percent, status)) in entries.iter().enumerate() {
+            built.push(Sample {
+                at: SystemTime::UNIX_EPOCH + Duration::from_secs(*secs),
+                percent: *percent,
+                power: None,
+                status: *status,
+                follows: if index == last {
+                    Follows::Sleep
+                } else {
+                    Follows::Poll
+                },
+            });
+        }
+        built
+    }
+
+    #[test]
+    fn a_suspend_is_told_apart_from_a_stretch_nobody_recorded() {
+        let entries = [
+            (0, 80.0, Status::Discharging),
+            (30, 79.0, Status::Discharging),
+            (30 + 8 * 3600, 68.0, Status::Discharging),
+        ];
+
+        let unrecorded = Series::from_history(&history(&entries), RECORD_GAP_TEST, false);
+        assert_eq!(unrecorded.gaps[0].kind, GapKind::Unexplained);
+        assert!(
+            unrecorded.gaps[0].describe().starts_with("Not recorded"),
+            "{}",
+            unrecorded.gaps[0].describe()
+        );
+
+        let slept = Series::from_history(&history_after_sleep(&entries), RECORD_GAP_TEST, false);
+        assert_eq!(slept.gaps[0].kind, GapKind::Asleep);
+        let text = slept.gaps[0].describe();
+        // The same stretch, now with what it cost and the rate it cost it at.
+        assert!(text.starts_with("Asleep"), "{text}");
+        assert!(text.contains("8 h"), "{text}");
+        assert!(text.contains("11% used"), "{text}");
+        assert!(text.contains("%/h"), "{text}");
+    }
+
+    #[test]
+    fn a_closed_app_is_told_apart_from_a_suspend() {
+        // Same stretch, same charge lost — but one was a sleeping laptop and the
+        // other a laptop that may well have been awake and in use.
+        let mut history = History::new(100);
+        for (secs, percent, follows) in [
+            (0u64, 80.0, Follows::Poll),
+            (30, 79.0, Follows::Poll),
+            (30 + 2 * 3600, 73.0, Follows::Launch),
+        ] {
+            history.push(Sample {
+                at: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
+                percent,
+                power: None,
+                status: Status::Discharging,
+                follows,
+            });
+        }
+        let series = Series::from_history(&history, RECORD_GAP_TEST, false);
+        assert_eq!(series.gaps[0].kind, GapKind::NotRunning);
+        let text = series.gaps[0].describe();
+        assert!(text.starts_with("App closed"), "{text}");
+        assert!(text.contains("6% used"), "{text}");
+        assert!(text.contains("3.0%/h"), "{text}");
+        // An explained gap is drawn more solidly than an unexplained one.
+        assert!(GapKind::Asleep.dash().1 > GapKind::NotRunning.dash().1);
+    }
+
     #[test]
     fn a_gap_is_recorded_with_both_of_its_ends() {
         let series = Series::from_history(
@@ -646,7 +758,7 @@ mod tests {
         let gap = series.gaps[0];
         assert_eq!(gap.from.percent, 79.0);
         assert_eq!(gap.to.percent, 40.0);
-        assert_eq!(gap.kind, GapKind::NotRecorded);
+        assert_eq!(gap.kind, GapKind::Unexplained);
         // 39 points of charge went somewhere unobserved; the hover says so.
         assert!(gap.describe().contains("39% used"), "{}", gap.describe());
     }
@@ -710,18 +822,25 @@ mod tests {
     fn a_bridged_gap_still_leaves_the_line_solid_elsewhere() {
         // #7 showed up as nothing drawn; with bridging it would show up as
         // everything dashed, so assert the solid stroke survives.
-        let gapped = Series::from_history(
-            &history(&[
-                (0, 80.0, Status::Discharging),
-                (30, 79.0, Status::Discharging),
-                (60, 78.0, Status::Discharging),
-                (7200, 40.0, Status::Discharging),
-                (7230, 39.0, Status::Discharging),
-                (7260, 38.0, Status::Discharging),
-            ]),
-            RECORD_GAP_TEST,
-            false,
-        );
+        //
+        // The recorded stretches have to be a real share of the span for this to
+        // mean anything: two samples at the edges of a two-hour plot are a
+        // couple of pixels wide, and an earlier version of this test passed only
+        // because the gap bridge was itself opaque.
+        let mut rows: Vec<(u64, f64, Status)> = (0..40)
+            .map(|step| (step * 30, 80.0 - step as f64 * 0.1, Status::Discharging))
+            .collect();
+        let resume = 40 * 30 + 2 * 3600;
+        rows.extend((0..40).map(|step| {
+            (
+                resume + step * 30,
+                68.0 - step as f64 * 0.1,
+                Status::Discharging,
+            )
+        }));
+
+        let gapped = Series::from_history(&history(&rows), RECORD_GAP_TEST, false);
+        assert_eq!(gapped.gaps.len(), 1, "one gap, in the middle");
         let stroke = stroked(&render(&gapped));
         assert!(stroke > 100, "solid line pixels expected, got {stroke}");
     }
@@ -741,6 +860,7 @@ mod tests {
                 percent: *percent,
                 power: None,
                 status: *status,
+                follows: Follows::Poll,
             });
         }
         history
