@@ -38,8 +38,13 @@ pub const MAX_AGE_SECS: f64 = 24.0 * 60.0 * 60.0;
 /// for the next load — a session left running for a week never reloads at all.
 const MAX_BYTES: u64 = 256 * 1024;
 
+/// Where everything this app persists lives.
+pub fn data_dir() -> PathBuf {
+    glib::user_data_dir().join("leyden")
+}
+
 fn path() -> PathBuf {
-    glib::user_data_dir().join("leyden").join("history.tsv")
+    data_dir().join("history.tsv")
 }
 
 /// Every sample from the last `MAX_AGE_SECS`, oldest first. A missing or

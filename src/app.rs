@@ -21,6 +21,7 @@ use crate::battery::types::{Battery, Status};
 use crate::format;
 use crate::graph::{IDLE_READOUT, Plot, Series};
 use crate::notify::{self, Alerts};
+use crate::recordings::{self, Kind, Run};
 use crate::settings::{Clock, MAX_POLL_SECS, MIN_POLL_SECS, Settings, Theme};
 use crate::sleep::{self, Clocks};
 use crate::store;
@@ -65,6 +66,7 @@ relm4::new_stateless_action!(ShowAction, AppLevelGroup, "show");
 relm4::new_stateless_action!(QuitAppAction, AppLevelGroup, "quit");
 
 relm4::new_action_group!(AppActionGroup, "win");
+relm4::new_stateless_action!(RecordingsAction, AppActionGroup, "recordings");
 relm4::new_stateless_action!(PreferencesAction, AppActionGroup, "preferences");
 relm4::new_stateless_action!(ShortcutsAction, AppActionGroup, "shortcuts");
 relm4::new_stateless_action!(AboutAction, AppActionGroup, "about");
@@ -80,6 +82,10 @@ pub struct AppModel {
     hidden: bool,
     settings: Settings,
     alerts: Alerts,
+    /// Completed runs, from disk and from whatever history is loaded.
+    recordings: Vec<Run>,
+    /// The status at the previous sample; a change is when a run can end.
+    last_status: Option<Status>,
     clocks: Clocks,
     /// What the next sample should record as preceding it. Set to `Launch` at
     /// startup so the stretch since the last session is named, and to `Sleep`
@@ -111,6 +117,9 @@ pub enum AppMsg {
     /// logind's `PrepareForSleep`: `true` just before the freeze, `false` on
     /// resume.
     SleepSignal(bool),
+    ShowRecordings,
+    /// Leave, but write the last reading first.
+    Quit,
 }
 
 /// Results from off-thread work. Disk I/O never happens in `update` (rule 3);
@@ -120,6 +129,7 @@ pub enum CommandMsg {
     Loaded(Vec<Sample>),
     Written(Result<(), String>),
     Saved(Result<(), String>),
+    Recorded(Result<(), String>),
 }
 
 impl AppModel {
@@ -144,6 +154,12 @@ impl AppModel {
             notify::send(alert, battery.percent);
         }
 
+        // A run can only end where the trend changes, so that is the only time
+        // the (linear) derivation is worth re-running.
+        if self.last_status.replace(battery.status) != Some(battery.status) {
+            self.refresh_recordings(sender);
+        }
+
         self.power_window.push(sample);
         if !self.should_record(&sample) {
             return;
@@ -156,6 +172,52 @@ impl AppModel {
                     .await
                     .map_err(|error| error.to_string())
                     .and_then(|result| result.map_err(|error| error.to_string())),
+            )
+        });
+    }
+
+    /// Write the newest reading before the process ends.
+    ///
+    /// Synchronous, unlike every other write: a `Command` dispatched here would
+    /// not finish before the main loop stops. Without it the record loses up to
+    /// `RECORD_SECS`, and the gap that follows starts in the wrong place.
+    fn flush(&mut self) {
+        let Some(battery) = &self.battery else {
+            return;
+        };
+        let sample = Sample {
+            at: history::now(),
+            percent: battery.percent,
+            power: battery.power,
+            status: battery.status,
+            follows: Follows::Poll,
+        };
+        // The cadence may already have written this second.
+        if self
+            .history
+            .newest()
+            .is_some_and(|newest| newest.at >= sample.at)
+        {
+            return;
+        }
+        if let Err(error) = store::append(&sample) {
+            tracing::warn!("could not flush the last reading: {error}");
+        }
+    }
+
+    /// Re-derive runs from the history and fold them into what is already
+    /// known, persisting only when something actually changed.
+    fn refresh_recordings(&mut self, sender: &ComponentSender<Self>) {
+        if !recordings::merge(&mut self.recordings, recordings::runs_in(&self.history)) {
+            return;
+        }
+        let runs = self.recordings.clone();
+        sender.oneshot_command(async move {
+            CommandMsg::Recorded(
+                relm4::spawn_blocking(move || recordings::save(&runs))
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(|result| result),
             )
         });
     }
@@ -204,6 +266,76 @@ impl AppModel {
     fn restart_poll(&mut self, sender: &ComponentSender<Self>) {
         self.stop_poll();
         self.start_poll(sender);
+    }
+
+    /// The last few runs of each kind, in their own dialog.
+    fn recordings_dialog(&self) -> adw::Dialog {
+        let stack = adw::ViewStack::new();
+        for (kind, title, icon) in [
+            (Kind::Discharge, "Discharges", "battery-level-30-symbolic"),
+            (
+                Kind::Charge,
+                "Charges",
+                "battery-level-50-charging-symbolic",
+            ),
+        ] {
+            let page = self.recordings_page(kind, title);
+            stack.add_titled_with_icon(&page, Some(kind.as_key()), title, icon);
+        }
+
+        let header = adw::HeaderBar::builder()
+            .title_widget(
+                &adw::ViewSwitcher::builder()
+                    .stack(&stack)
+                    .policy(adw::ViewSwitcherPolicy::Wide)
+                    .build(),
+            )
+            .build();
+
+        let toolbar = adw::ToolbarView::builder().content(&stack).build();
+        toolbar.add_top_bar(&header);
+
+        adw::Dialog::builder()
+            .title("Recordings")
+            .child(&toolbar)
+            .content_width(460)
+            .content_height(580)
+            .build()
+    }
+
+    fn recordings_page(&self, kind: Kind, title: &str) -> gtk::Widget {
+        let runs = recordings::latest(&self.recordings, kind);
+        if runs.is_empty() {
+            let empty = adw::StatusPage::builder()
+                .icon_name("document-open-recent-symbolic")
+                .title(format!("No {} Yet", title.to_lowercase()))
+                .description(
+                    "Runs appear here once the battery has been on one side of the \
+                     line for more than a few minutes.",
+                )
+                .build();
+            return empty.upcast();
+        }
+
+        let group = adw::PreferencesGroup::new();
+        for run in runs {
+            group.add(&recording_row(run, self.settings.clock.twelve_hour()));
+        }
+
+        let clamp = adw::Clamp::builder()
+            .maximum_size(520)
+            .child(&group)
+            .margin_top(18)
+            .margin_bottom(18)
+            .margin_start(12)
+            .margin_end(12)
+            .build();
+        gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vexpand(true)
+            .child(&clamp)
+            .build()
+            .upcast()
     }
 
     fn preferences_dialog(&self, sender: &ComponentSender<Self>) -> adw::PreferencesDialog {
@@ -460,6 +592,12 @@ impl Component for AppModel {
 
             adw::ToolbarView {
                 add_top_bar = &adw::HeaderBar {
+                    pack_start = &gtk::Button {
+                        set_icon_name: "document-open-recent-symbolic",
+                        set_tooltip_text: Some("Recordings"),
+                        set_action_name: Some("win.recordings"),
+                    },
+
                     #[wrap(Some)]
                     set_title_widget = &adw::WindowTitle {
                         set_title: "Leyden",
@@ -672,6 +810,8 @@ impl Component for AppModel {
             hidden: !root.is_visible(),
             settings,
             alerts: Alerts::default(),
+            recordings: recordings::load(),
+            last_status: None,
             clocks: Clocks::default(),
             // The first reading of a session closes the stretch in which the app
             // was not running.
@@ -697,6 +837,10 @@ impl Component for AppModel {
         menu.append(Some("Quit"), Some("win.quit"));
         widgets.menu_button.set_menu_model(Some(&menu));
 
+        let recordings_sender = sender.input_sender().clone();
+        let recordings: RelmAction<RecordingsAction> = RelmAction::new_stateless(move |_| {
+            recordings_sender.send(AppMsg::ShowRecordings).ok();
+        });
         let preferences_sender = sender.input_sender().clone();
         let preferences: RelmAction<PreferencesAction> = RelmAction::new_stateless(move |_| {
             preferences_sender.send(AppMsg::ShowPreferences).ok();
@@ -709,10 +853,12 @@ impl Component for AppModel {
         let about: RelmAction<AboutAction> = RelmAction::new_stateless(move |_| {
             about_sender.send(AppMsg::ShowAbout).ok();
         });
+        let quit_sender = sender.input_sender().clone();
         let quit: RelmAction<QuitAction> = RelmAction::new_stateless(move |_| {
-            relm4::main_application().quit();
+            quit_sender.send(AppMsg::Quit).ok();
         });
         let mut actions = RelmActionGroup::<AppActionGroup>::new();
+        actions.add_action(recordings);
         actions.add_action(preferences);
         actions.add_action(shortcuts);
         actions.add_action(about);
@@ -723,8 +869,9 @@ impl Component for AppModel {
         let show: RelmAction<ShowAction> = RelmAction::new_stateless(move |_| {
             window.present();
         });
+        let quit_app_sender = sender.input_sender().clone();
         let quit_app: RelmAction<QuitAppAction> = RelmAction::new_stateless(move |_| {
-            relm4::main_application().quit();
+            quit_app_sender.send(AppMsg::Quit).ok();
         });
         let mut app_actions = RelmActionGroup::<AppLevelGroup>::new();
         app_actions.add_action(show);
@@ -732,6 +879,7 @@ impl Component for AppModel {
         app_actions.register_for_main_application();
 
         let application = relm4::main_application();
+        application.set_accelerators_for_action::<RecordingsAction>(&["<Control>r"]);
         application.set_accelerators_for_action::<PreferencesAction>(&["<Control>comma"]);
         application.set_accelerators_for_action::<ShortcutsAction>(&["<Control>question"]);
         application.set_accelerators_for_action::<QuitAction>(&["<Control>q"]);
@@ -771,7 +919,7 @@ impl Component for AppModel {
     fn update_cmd(
         &mut self,
         msg: Self::CommandOutput,
-        _sender: ComponentSender<Self>,
+        sender: ComponentSender<Self>,
         _root: &Self::Root,
     ) {
         match msg {
@@ -779,6 +927,9 @@ impl Component for AppModel {
                 tracing::debug!("loaded {} samples from the history file", samples.len());
                 self.history.absorb(samples);
                 self.history.prune_older_than(store::MAX_AGE_SECS);
+                // Seed from whatever was already on disk, so the list has
+                // content before the next cycle completes.
+                self.refresh_recordings(&sender);
             }
             CommandMsg::Written(Err(error)) => {
                 tracing::warn!("could not write the history file: {error}");
@@ -788,6 +939,10 @@ impl Component for AppModel {
                 tracing::warn!("could not write the settings file: {error}");
             }
             CommandMsg::Saved(Ok(())) => {}
+            CommandMsg::Recorded(Err(error)) => {
+                tracing::warn!("could not write the recordings file: {error}");
+            }
+            CommandMsg::Recorded(Ok(())) => {}
         }
     }
 
@@ -832,8 +987,13 @@ impl Component for AppModel {
                     root.set_visible(false);
                     notify::background_running();
                 } else {
-                    relm4::main_application().quit();
+                    sender.input(AppMsg::Quit);
                 }
+            }
+
+            AppMsg::Quit => {
+                self.flush();
+                relm4::main_application().quit();
             }
 
             AppMsg::SetBackground(enabled) => {
@@ -877,6 +1037,8 @@ impl Component for AppModel {
                 }
             }
 
+            AppMsg::ShowRecordings => self.recordings_dialog().present(Some(root)),
+
             AppMsg::ShowPreferences => self.preferences_dialog(&sender).present(Some(root)),
 
             AppMsg::ShowShortcuts => shortcuts_dialog().present(Some(root)),
@@ -899,6 +1061,7 @@ impl Component for AppModel {
 /// The accelerators registered in `init`, in the order they are worth learning.
 fn shortcuts_dialog() -> adw::ShortcutsDialog {
     let section = adw::ShortcutsSection::new(Some("General"));
+    section.add(adw::ShortcutsItem::new("Recordings", "<Control>r"));
     section.add(adw::ShortcutsItem::new("Preferences", "<Control>comma"));
     section.add(adw::ShortcutsItem::new(
         "Keyboard Shortcuts",
@@ -909,4 +1072,42 @@ fn shortcuts_dialog() -> adw::ShortcutsDialog {
     let dialog = adw::ShortcutsDialog::new();
     dialog.add(section);
     dialog
+}
+
+/// One run: where the charge went, and how long it took to get there.
+fn recording_row(run: &Run, twelve_hour: bool) -> adw::ActionRow {
+    let title = format!(
+        "{}% → {}%",
+        run.from_percent.round() as i64,
+        run.to_percent.round() as i64
+    );
+
+    let started = run
+        .started
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() as i64);
+    let mut subtitle = format!(
+        "{} · {}",
+        format::time(started, twelve_hour),
+        format::duration(run.elapsed())
+    );
+    if let Some(rate) = run.rate().filter(|rate| *rate > 0.05) {
+        subtitle.push_str(&format!(" · {rate:.1}%/h"));
+    }
+    if let Some(watts) = run.watts {
+        subtitle.push_str(&format!(" · {watts:.1} W"));
+    }
+
+    let row = adw::ActionRow::builder()
+        .title(title)
+        .subtitle(subtitle)
+        .build();
+    if run.in_progress {
+        let badge = gtk::Label::builder()
+            .label("in progress")
+            .css_classes(["dim-label", "caption"])
+            .build();
+        row.add_suffix(&badge);
+    }
+    row
 }
