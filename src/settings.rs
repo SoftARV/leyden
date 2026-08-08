@@ -13,7 +13,9 @@
 use std::path::PathBuf;
 
 use relm4::adw;
+use relm4::gtk::gio;
 use relm4::gtk::glib;
+use relm4::gtk::prelude::*;
 
 const GROUP: &str = "leyden";
 
@@ -79,11 +81,81 @@ impl Theme {
     }
 }
 
+/// How the hover shows a time of day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Clock {
+    /// Whatever GNOME itself is set to.
+    #[default]
+    System,
+    TwentyFour,
+    Twelve,
+}
+
+impl Clock {
+    fn as_key(self) -> &'static str {
+        match self {
+            Clock::System => "system",
+            Clock::TwentyFour => "24h",
+            Clock::Twelve => "12h",
+        }
+    }
+
+    fn from_key(key: &str) -> Self {
+        match key {
+            "24h" => Clock::TwentyFour,
+            "12h" => Clock::Twelve,
+            _ => Clock::System,
+        }
+    }
+
+    pub fn index(self) -> u32 {
+        match self {
+            Clock::System => 0,
+            Clock::TwentyFour => 1,
+            Clock::Twelve => 2,
+        }
+    }
+
+    pub fn from_index(index: u32) -> Self {
+        match index {
+            1 => Clock::TwentyFour,
+            2 => Clock::Twelve,
+            _ => Clock::System,
+        }
+    }
+
+    /// Resolved against the desktop when set to `System`.
+    pub fn twelve_hour(self) -> bool {
+        match self {
+            Clock::TwentyFour => false,
+            Clock::Twelve => true,
+            Clock::System => system_twelve_hour(),
+        }
+    }
+}
+
+/// GNOME's own `clock-format`, or 24-hour if it cannot be read.
+///
+/// `gio::Settings::new` **aborts the process** when the schema is not
+/// installed, so the schema is looked up first. A non-GNOME desktop must not
+/// take the app down over a time format.
+fn system_twelve_hour() -> bool {
+    const SCHEMA: &str = "org.gnome.desktop.interface";
+    let Some(source) = gio::SettingsSchemaSource::default() else {
+        return false;
+    };
+    if source.lookup(SCHEMA, true).is_none() {
+        return false;
+    }
+    gio::Settings::new(SCHEMA).string("clock-format") == "12h"
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub poll_secs: u32,
     pub theme: Theme,
     pub alerts: bool,
+    pub clock: Clock,
 }
 
 impl Default for Settings {
@@ -94,6 +166,7 @@ impl Default for Settings {
             // Off by default: GNOME already warns about low battery, and a
             // second banner saying the same thing is noise, not a feature.
             alerts: false,
+            clock: Clock::default(),
         }
     }
 }
@@ -119,6 +192,9 @@ impl Settings {
                 .string(GROUP, "theme")
                 .map_or_else(|_| Theme::default(), |key| Theme::from_key(&key)),
             alerts: file.boolean(GROUP, "alerts").unwrap_or(false),
+            clock: file
+                .string(GROUP, "clock")
+                .map_or_else(|_| Clock::default(), |key| Clock::from_key(&key)),
         }
     }
 
@@ -131,6 +207,7 @@ impl Settings {
         file.set_integer(GROUP, "poll-secs", secs);
         file.set_string(GROUP, "theme", self.theme.as_key());
         file.set_boolean(GROUP, "alerts", self.alerts);
+        file.set_string(GROUP, "clock", self.clock.as_key());
 
         let path = path();
         if let Some(dir) = path.parent() {
@@ -158,6 +235,17 @@ mod tests {
             assert_eq!(Theme::from_key(theme.as_key()), theme);
             assert_eq!(Theme::from_index(theme.index()), theme);
         }
+    }
+
+    #[test]
+    fn clock_keys_round_trip() {
+        for clock in [Clock::System, Clock::TwentyFour, Clock::Twelve] {
+            assert_eq!(Clock::from_key(clock.as_key()), clock);
+            assert_eq!(Clock::from_index(clock.index()), clock);
+        }
+        assert_eq!(Clock::from_key("half past"), Clock::System);
+        assert!(Clock::Twelve.twelve_hour());
+        assert!(!Clock::TwentyFour.twelve_hour());
     }
 
     #[test]

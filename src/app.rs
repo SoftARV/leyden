@@ -19,9 +19,9 @@ use crate::battery::history::{self, History, Sample};
 use crate::battery::sysfs;
 use crate::battery::types::{Battery, Status};
 use crate::format;
-use crate::graph::Series;
+use crate::graph::{IDLE_READOUT, Plot, Series};
 use crate::notify::{self, Alerts};
-use crate::settings::{MAX_POLL_SECS, MIN_POLL_SECS, Settings, Theme};
+use crate::settings::{Clock, MAX_POLL_SECS, MIN_POLL_SECS, Settings, Theme};
 use crate::store;
 
 /// One graph sample per this many seconds, whatever the poll rate. A day at this
@@ -63,6 +63,8 @@ pub struct AppModel {
     poll: Option<glib::SourceId>,
     settings: Settings,
     alerts: Alerts,
+    /// Shared with the graph's draw and hover callbacks — see `graph::Plot`.
+    plot: Plot,
 }
 
 #[derive(Debug)]
@@ -75,6 +77,7 @@ pub enum AppMsg {
     SetPollSecs(u32),
     SetTheme(Theme),
     SetAlerts(bool),
+    SetClock(Clock),
 }
 
 /// Results from off-thread work. Disk I/O never happens in `update` (rule 3);
@@ -180,6 +183,23 @@ impl AppModel {
                 .ok();
         });
         group.add(&theme);
+
+        let clock = adw::ComboRow::builder()
+            .title("Time format")
+            .model(&gtk::StringList::new(&[
+                "Follow system",
+                "24-hour",
+                "12-hour",
+            ]))
+            .selected(self.settings.clock.index())
+            .build();
+        let clock_sender = sender.input_sender().clone();
+        clock.connect_selected_notify(move |row| {
+            clock_sender
+                .send(AppMsg::SetClock(Clock::from_index(row.selected())))
+                .ok();
+        });
+        group.add(&clock);
 
         let alerts = adw::SwitchRow::builder()
             .title("Battery alerts")
@@ -457,12 +477,28 @@ impl Component for AppModel {
                                     #[watch]
                                     set_description: Some(&model.history_caption()),
 
+                                    #[name = "graph"]
                                     gtk::DrawingArea {
                                         set_height_request: 160,
                                         add_css_class: "card",
                                         #[watch]
-                                        set_draw_func: Series::from_history(&model.history, RECORD_GAP_SECS)
-                                            .draw_func(),
+                                        set_draw_func: model.plot.refreshed(
+                                            Series::from_history(
+                                                &model.history,
+                                                RECORD_GAP_SECS,
+                                                model.settings.clock.twelve_hour(),
+                                            )
+                                        ),
+                                    },
+
+                                    #[name = "readout"]
+                                    gtk::Label {
+                                        set_label: IDLE_READOUT,
+                                        set_margin_top: 6,
+                                        set_ellipsize: gtk::pango::EllipsizeMode::End,
+                                        add_css_class: "dim-label",
+                                        add_css_class: "numeric",
+                                        add_css_class: "caption",
                                     },
                                 },
 
@@ -566,10 +602,13 @@ impl Component for AppModel {
             poll: None,
             settings,
             alerts: Alerts::default(),
+            plot: Plot::default(),
         };
         model.sample(&sender);
 
         let widgets = view_output!();
+
+        model.plot.install_readout(&widgets.graph, &widgets.readout);
 
         let menu = gio::Menu::new();
         menu.append(Some("Preferences"), Some("win.preferences"));
@@ -670,6 +709,13 @@ impl Component for AppModel {
                     // a fresh one.
                     self.stop_poll();
                     self.start_poll(&sender);
+                    self.save_settings(&sender);
+                }
+            }
+
+            AppMsg::SetClock(clock) => {
+                if clock != self.settings.clock {
+                    self.settings.clock = clock;
                     self.save_settings(&sender);
                 }
             }
