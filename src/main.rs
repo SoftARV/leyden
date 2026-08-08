@@ -5,6 +5,7 @@ mod app;
 mod battery;
 mod format;
 mod graph;
+mod store;
 
 use relm4::RelmApp;
 use relm4::gtk;

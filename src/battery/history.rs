@@ -1,17 +1,28 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! In-memory sample ring for the charge graph. Session-scoped: nothing is
-//! persisted yet, so the window starts empty on every launch.
+//! The sample ring behind the graph and the smoothed power rate. One instance
+//! holds the recorded history, loaded from and appended to `store`; another
+//! holds the last couple of minutes of live readings for smoothing only.
 //!
 //! Samples are stamped with `SystemTime`, not `Instant`: `Instant` does not
 //! advance while the machine is suspended, which would draw an overnight sleep
 //! as an instant vertical drop.
 
 use std::collections::VecDeque;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::types::Status;
+
+/// Now, truncated to a whole second — the same resolution the history file
+/// stores. Keeping the two identical is what lets a sample read back from disk
+/// be recognised as the one already in memory rather than duplicating it.
+pub fn now() -> SystemTime {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or_else(
+        |_| SystemTime::now(),
+        |since| UNIX_EPOCH + Duration::from_secs(since.as_secs()),
+    )
+}
 
 /// Samples further apart than this did not just miss a poll — the machine slept
 /// or the window was hidden and the timer came off. Nothing may be interpolated
@@ -56,6 +67,46 @@ impl History {
 
     pub fn iter(&self) -> impl Iterator<Item = &Sample> {
         self.samples.iter()
+    }
+
+    pub fn newest(&self) -> Option<&Sample> {
+        self.samples.back()
+    }
+
+    /// Merge samples read from disk. They are older than whatever the live poll
+    /// has already collected, so the two sets are combined and re-sorted rather
+    /// than appended — `push` only ever adds to the newest end.
+    ///
+    /// Deduplicated by timestamp: the load and the first append race each other,
+    /// so a fresh session can read back the very sample it just wrote.
+    pub fn absorb(&mut self, samples: Vec<Sample>) {
+        if samples.is_empty() {
+            return;
+        }
+        let mut all: Vec<Sample> = samples.into_iter().chain(self.samples.drain(..)).collect();
+        all.sort_by_key(|sample| sample.at);
+        all.dedup_by_key(|sample| sample.at);
+        if all.len() > self.capacity {
+            all.drain(..all.len() - self.capacity);
+        }
+        self.samples = all.into();
+    }
+
+    /// Drop everything more than `max_age_secs` behind the newest sample. Age is
+    /// measured from the newest sample rather than from now, so a history loaded
+    /// after a week away is discarded as one block instead of surviving because
+    /// the clock happens to agree with it.
+    pub fn prune_older_than(&mut self, max_age_secs: f64) {
+        let Some(newest) = self.samples.back().map(|sample| sample.at) else {
+            return;
+        };
+        while let Some(oldest) = self.samples.front() {
+            if elapsed_secs(oldest.at, newest) > max_age_secs {
+                self.samples.pop_front();
+            } else {
+                break;
+            }
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -193,6 +244,55 @@ mod tests {
             (7200, 10.0, Status::Discharging),
         ]);
         assert_eq!(history.recent_power(f64::MAX), Some(10.0));
+    }
+
+    #[test]
+    fn absorbed_samples_land_before_the_live_ones() {
+        let mut live = history_of(&[(500, 12.0)]);
+        live.absorb(samples_of(&[(100, 10.0), (200, 11.0)]));
+        assert_eq!(powers(&live), vec![10.0, 11.0, 12.0]);
+    }
+
+    #[test]
+    fn absorbing_drops_a_sample_this_session_already_has() {
+        // The load and the first append race; reading back our own line must not
+        // put the same instant on the graph twice.
+        let mut live = history_of(&[(100, 10.0), (200, 11.0)]);
+        live.absorb(samples_of(&[(100, 10.0)]));
+        assert_eq!(powers(&live), vec![10.0, 11.0]);
+    }
+
+    #[test]
+    fn absorbing_respects_capacity() {
+        let mut live = History::new(2);
+        live.absorb(samples_of(&[(100, 1.0), (200, 2.0), (300, 3.0)]));
+        assert_eq!(powers(&live), vec![2.0, 3.0]);
+    }
+
+    #[test]
+    fn pruning_measures_age_from_the_newest_sample() {
+        let mut aged = history_of(&[(0, 1.0), (100, 2.0), (7200, 3.0)]);
+        aged.prune_older_than(3600.0);
+        assert_eq!(powers(&aged), vec![3.0]);
+    }
+
+    fn samples_of(entries: &[(u64, f64)]) -> Vec<Sample> {
+        history_of(entries).iter().copied().collect()
+    }
+
+    fn powers(history: &History) -> Vec<f64> {
+        history
+            .iter()
+            .map(|s| s.power.unwrap_or_default())
+            .collect()
+    }
+
+    fn history_of(entries: &[(u64, f64)]) -> History {
+        let rows: Vec<(u64, f64, Status)> = entries
+            .iter()
+            .map(|(secs, power)| (*secs, *power, Status::Discharging))
+            .collect();
+        history(&rows)
     }
 
     #[test]
